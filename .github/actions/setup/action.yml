@@ -1,0 +1,32 @@
+name: Set up the workspace
+description: Install pnpm and Node, then install the workspace dependencies from the lockfile.
+
+inputs:
+  node-version:
+    description: Node version to install. Defaults to the version pinned in .nvmrc.
+    required: false
+    default: ""
+  cache:
+    description: Package manager whose store setup-node caches. Pass an empty string to disable caching.
+    required: false
+    default: pnpm
+
+runs:
+  using: composite
+  steps:
+    # Must precede setup-node: its `cache: pnpm` needs a pnpm binary on PATH to
+    # locate the store. The version comes from the `packageManager` field.
+    - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        # setup-node falls back to the file when the explicit version is empty,
+        # so a matrix or the release jobs can override .nvmrc without a second
+        # action call.
+        node-version: ${{ inputs.node-version }}
+        node-version-file: .nvmrc
+        cache: ${{ inputs.cache }}
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

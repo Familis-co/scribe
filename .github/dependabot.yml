@@ -8,13 +8,24 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Brussels"
+    open-pull-requests-limit: 10
     groups:
+      # One pull request for the whole workspace. A separate pull request per
+      # package rewrites pnpm-lock.yaml, so they all conflict with each other
+      # the moment one of them lands.
       npm-dependencies:
         patterns:
           - "*"
+    commit-message:
+      prefix: "build"
+      include: "scope"
 
   - package-ecosystem: "github-actions"
-    directory: "/"
+    # A bare "/" only scans .github/workflows, which would leave the versions
+    # pinned inside the composite action unwatched.
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -24,3 +35,5 @@ updates:
       github-actions:
         patterns:
           - "*"
+    commit-message:
+      prefix: "ci"
