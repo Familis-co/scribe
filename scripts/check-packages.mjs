@@ -63,9 +63,9 @@ try {
       "",
     ].join("\n"),
   );
-  execFileSync("pnpm", ["install", "--offline"], {
+  execFileSync("pnpm", ["install", "--prefer-offline"], {
     cwd: consumerDirectory,
-    stdio: "ignore",
+    stdio: "inherit",
   });
 
   const packagesToLoad = Object.keys(archives);

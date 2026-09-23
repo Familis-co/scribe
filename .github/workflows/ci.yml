@@ -38,4 +38,4 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: bun test packages/core/test/bun-smoke.bun.ts
+      - run: bun test ./packages/core/test/bun-smoke.bun.ts
