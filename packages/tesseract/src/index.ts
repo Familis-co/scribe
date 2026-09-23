@@ -16,6 +16,7 @@ import {
 import sharp from "sharp";
 import { createScheduler, createWorker, OEM, type LoggerMessage } from "tesseract.js";
 
+/** Tesseract.js scheduler that dispatches jobs across a pool of workers. */
 type Scheduler = ReturnType<typeof createScheduler>;
 
 /** Configuration for a local Tesseract.js OCR engine. */
@@ -39,15 +40,35 @@ export interface TesseractEngineOptions {
   readonly logger?: (message: LoggerMessage) => void;
 }
 
+/** Initialized workers dedicated to one normalized language set. */
 interface WorkerPool {
   readonly scheduler: Scheduler;
 }
 
+/**
+ * Throws when a cancellation signal has already fired.
+ *
+ * @param signal - Optional cancellation signal
+ * @throws `AbortError` when the signal is aborted, with its reason as `cause`
+ */
 function abortIfNeeded(signal?: AbortSignal): void {
   if (signal?.aborted)
     throw new AbortError("The OCR operation was aborted.", { cause: signal.reason });
 }
 
+/**
+ * Rejects as soon as a signal fires, without cancelling the underlying work.
+ *
+ * @remarks
+ * Tesseract.js jobs cannot be interrupted, so an aborted recognition keeps its worker busy until it
+ * completes. The caller only stops waiting.
+ *
+ * @typeParam T - Resolved value type
+ * @param promise - Operation to wait for
+ * @param signal - Optional cancellation signal
+ * @returns The operation's value when it settles before the signal fires
+ * @throws `AbortError` when the signal fires first
+ */
 async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
   abortIfNeeded(signal);
@@ -70,6 +91,14 @@ async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
   });
 }
 
+/**
+ * Converts Tesseract word boxes into normalized OCR tokens.
+ *
+ * @param blocks - Tesseract layout blocks, or `null` when no layout was produced
+ * @param width - Source bitmap width in pixels
+ * @param height - Source bitmap height in pixels
+ * @returns Word tokens in reading order with one line index per Tesseract line
+ */
 function normalizedTokens(
   blocks: Tesseract.Block[] | null,
   width: number,
@@ -103,6 +132,12 @@ function normalizedTokens(
   return tokens;
 }
 
+/**
+ * Encodes a raw bitmap as a PNG that Tesseract.js can read.
+ *
+ * @param bitmap - Grayscale or RGBA page render
+ * @returns PNG bytes carrying the bitmap density, 300 DPI when unknown
+ */
 async function imageBuffer(bitmap: PageBitmap): Promise<Buffer> {
   const channels = bitmap.format === "gray8" ? 1 : 4;
   return sharp(bitmap.data, {
@@ -113,15 +148,27 @@ async function imageBuffer(bitmap: PageBitmap): Promise<Buffer> {
     .toBuffer();
 }
 
+/** OCR engine that lazily creates one worker pool per language set. */
 class TesseractEngine implements OcrEngine {
   readonly #pools = new Map<string, Promise<WorkerPool>>();
   #closed = false;
 
+  /**
+   * Stores validated engine options.
+   *
+   * @param options - Engine options with a resolved worker concurrency
+   */
   constructor(
     private readonly options: Required<Pick<TesseractEngineOptions, "concurrency">> &
       TesseractEngineOptions,
   ) {}
 
+  /**
+   * {@inheritDoc @familis/scribe#OcrEngine.recognize}
+   *
+   * @throws `OcrError` when no language is given, initialization fails, or recognition fails
+   * @throws `AbortError` when the signal fires before recognition completes
+   */
   async recognize(bitmap: PageBitmap, options: OcrRecognizeOptions): Promise<OcrResult> {
     if (this.#closed) throw new DisposedError();
     abortIfNeeded(options.signal);
@@ -150,6 +197,7 @@ class TesseractEngine implements OcrEngine {
     }
   }
 
+  /** {@inheritDoc @familis/scribe#OcrEngine.close} */
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
@@ -162,6 +210,12 @@ class TesseractEngine implements OcrEngine {
     this.#pools.clear();
   }
 
+  /**
+   * Returns the worker pool for a language set, creating it on first use.
+   *
+   * @param languages - Requested languages, deduplicated and sorted to form the cache key
+   * @returns The shared pool for this language set
+   */
   #pool(languages: readonly string[]): Promise<WorkerPool> {
     const normalized = [
       ...new Set(languages.map((language) => language.trim()).filter(Boolean)),
@@ -174,6 +228,13 @@ class TesseractEngine implements OcrEngine {
     return created;
   }
 
+  /**
+   * Starts the configured number of workers for a language set.
+   *
+   * @param languages - Normalized language identifiers
+   * @returns A pool whose scheduler owns every started worker
+   * @throws `OcrError` when a worker cannot be initialized
+   */
   async #createPool(languages: readonly string[]): Promise<WorkerPool> {
     const scheduler = createScheduler();
     try {

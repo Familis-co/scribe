@@ -20,9 +20,17 @@ import {
   type TextToken,
 } from "@familis/scribe";
 
+/** `FPDF_ERR_PASSWORD`, returned by `FPDF_GetLastError` for missing or wrong passwords. */
 const PDFIUM_ERROR_PASSWORD = 4;
+/** PDFium bitmaps use four bytes per pixel in BGRA order. */
 const BYTES_PER_PIXEL = 4;
 
+/**
+ * Returns the Emscripten heap backing a PDFium module.
+ *
+ * @param module - Initialized PDFium module
+ * @returns The module's linear memory as bytes
+ */
 function heap(module: WrappedPdfiumModule): Uint8Array {
   // The Emscripten heap exists at runtime but is intentionally omitted from the public type.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion
@@ -40,18 +48,37 @@ export interface PdfiumEngineOptions {
   readonly moduleOverrides?: Partial<PdfiumModule>;
 }
 
+/** One character read from PDFium with its normalized box. */
 interface PositionedCharacter {
   readonly text: string;
   readonly box: BoundingBox;
 }
 
+/**
+ * Throws when a cancellation signal has already fired.
+ *
+ * @param signal - Optional cancellation signal
+ * @throws `AbortError` when the signal is aborted, with its reason as `cause`
+ */
 function abortIfNeeded(signal?: AbortSignal): void {
   if (signal?.aborted)
     throw new AbortError("The PDF operation was aborted.", { cause: signal.reason });
 }
 
+/**
+ * Clamps a value to the normalized `[0, 1]` range.
+ *
+ * @param value - Number to clamp
+ * @returns The clamped value
+ */
 const clamp = (value: number): number => Math.min(1, Math.max(0, value));
 
+/**
+ * Computes the smallest rectangle enclosing every box.
+ *
+ * @param boxes - Non-empty list of rectangles
+ * @returns The enclosing rectangle
+ */
 function unionBoxes(boxes: readonly BoundingBox[]): BoundingBox {
   const x = Math.min(...boxes.map((box) => box.x));
   const y = Math.min(...boxes.map((box) => box.y));
@@ -60,12 +87,24 @@ function unionBoxes(boxes: readonly BoundingBox[]): BoundingBox {
   return { x, y, width: right - x, height: bottom - y };
 }
 
+/**
+ * Groups positioned characters into word tokens.
+ *
+ * @remarks
+ * Whitespace always ends a word, and line breaks advance the line index. Without whitespace, a
+ * vertical center shift above 65% of the glyph height starts a new line, and a horizontal gap
+ * wider than 1.8 glyph widths (at least 0.6% of the page) starts a new word.
+ *
+ * @param characters - Characters in PDFium text order
+ * @returns Non-empty word tokens with line indices
+ */
 function groupCharacters(characters: readonly PositionedCharacter[]): readonly TextToken[] {
   const tokens: TextToken[] = [];
   let word: PositionedCharacter[] = [];
   let lineIndex = 0;
   let previous: PositionedCharacter | undefined;
 
+  /** Emits the pending characters as one token and starts a new word. */
   const flush = (): void => {
     if (word.length === 0) return;
     tokens.push({
@@ -105,12 +144,20 @@ function groupCharacters(characters: readonly PositionedCharacter[]): readonly T
   return tokens.filter((token) => token.text.trim() !== "");
 }
 
+/** PDFium-backed page whose native handle is released by {@link PdfiumPage.close}. */
 class PdfiumPage implements PdfPage {
   readonly number: number;
   readonly width: number;
   readonly height: number;
   #closed = false;
 
+  /**
+   * Wraps a loaded PDFium page.
+   *
+   * @param module - Initialized PDFium module owning the page
+   * @param pagePointer - Native `FPDF_PAGE` handle
+   * @param index - Zero-based page index
+   */
   constructor(
     private readonly module: WrappedPdfiumModule,
     private readonly pagePointer: number,
@@ -121,6 +168,7 @@ class PdfiumPage implements PdfPage {
     this.height = module.FPDF_GetPageHeightF(pagePointer);
   }
 
+  /** {@inheritDoc @familis/scribe#PdfPage.extractText} */
   async extractText(signal?: AbortSignal): Promise<readonly TextToken[]> {
     this.#assertOpen();
     abortIfNeeded(signal);
@@ -162,6 +210,7 @@ class PdfiumPage implements PdfPage {
     }
   }
 
+  /** {@inheritDoc @familis/scribe#PdfPage.render} */
   async render(options: PdfRenderOptions): Promise<PageBitmap> {
     this.#assertOpen();
     abortIfNeeded(options.signal);
@@ -209,22 +258,36 @@ class PdfiumPage implements PdfPage {
     }
   }
 
+  /** Releases the native page handle. Repeated calls are ignored. */
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.module.FPDF_ClosePage(this.pagePointer);
   }
 
+  /**
+   * Guards against use after {@link PdfiumPage.close}.
+   *
+   * @throws `DisposedError` when the page is closed
+   */
   #assertOpen(): void {
     if (this.#closed) throw new DisposedError();
   }
 }
 
+/** PDFium-backed document that caches loaded pages and owns its input buffer. */
 class PdfiumDocument implements PdfDocument {
   readonly pageCount: number;
   readonly #pages = new Map<number, PdfiumPage>();
   #closed = false;
 
+  /**
+   * Wraps a loaded PDFium document.
+   *
+   * @param module - Initialized PDFium module owning the document
+   * @param documentPointer - Native `FPDF_DOCUMENT` handle
+   * @param inputPointer - Heap address of the PDF bytes, freed on close
+   */
   constructor(
     private readonly module: WrappedPdfiumModule,
     private readonly documentPointer: number,
@@ -233,6 +296,11 @@ class PdfiumDocument implements PdfDocument {
     this.pageCount = module.FPDF_GetPageCount(documentPointer);
   }
 
+  /**
+   * {@inheritDoc @familis/scribe#PdfDocument.getPage}
+   *
+   * @throws `RangeError` when the index is outside the document
+   */
   async getPage(index: number): Promise<PdfPage> {
     this.#assertOpen();
     if (!Number.isInteger(index) || index < 0 || index >= this.pageCount) {
@@ -247,6 +315,7 @@ class PdfiumDocument implements PdfDocument {
     return page;
   }
 
+  /** {@inheritDoc @familis/scribe#PdfDocument.close} */
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
@@ -256,17 +325,34 @@ class PdfiumDocument implements PdfDocument {
     this.module.pdfium.wasmExports.free(this.inputPointer);
   }
 
+  /**
+   * Guards against use after {@link PdfiumDocument.close}.
+   *
+   * @throws `DisposedError` when the document is closed
+   */
   #assertOpen(): void {
     if (this.#closed) throw new DisposedError();
   }
 }
 
+/** PDFium-backed engine that tracks open documents so it can close them on shutdown. */
 class PdfiumEngine implements PdfEngine {
   #closed = false;
   readonly #documents = new Set<PdfiumDocument>();
 
+  /**
+   * Wraps an initialized PDFium module.
+   *
+   * @param module - PDFium module dedicated to this engine
+   */
   constructor(private readonly module: WrappedPdfiumModule) {}
 
+  /**
+   * {@inheritDoc @familis/scribe#PdfEngine.open}
+   *
+   * @throws `EncryptedPdfError` when the password is missing or invalid
+   * @throws `InvalidPdfError` when PDFium rejects the document
+   */
   async open(input: Uint8Array, options: PdfOpenOptions = {}): Promise<PdfDocument> {
     if (this.#closed) throw new DisposedError();
     abortIfNeeded(options.signal);
@@ -295,6 +381,7 @@ class PdfiumEngine implements PdfEngine {
     return document;
   }
 
+  /** {@inheritDoc @familis/scribe#PdfEngine.close} */
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;

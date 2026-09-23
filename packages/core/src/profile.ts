@@ -128,6 +128,14 @@ export interface FieldOptions {
   readonly defaultValue?: unknown;
 }
 
+/**
+ * Validates builder options and produces a normalized field definition.
+ *
+ * @param options - Selection, capture, transformation, and requirement options
+ * @param many - Whether repeated captures are returned as an array
+ * @returns A normalized field definition
+ * @throws `RangeError` when `warnBelowConfidence` is outside `[0, 1]`
+ */
 function makeField(options: FieldOptions, many: boolean): FieldDefinition {
   if (
     options.warnBelowConfidence !== undefined &&
@@ -195,10 +203,15 @@ export const select = {
    * @returns An anchor-relative selector
    */
   relativeToAnchor(options: {
+    /** Literal or regular-expression anchor, matched line by line. */
     readonly text: string | RegExp;
+    /** Rectangle offset from the anchor's top-left position. */
     readonly offset: BoundingBox;
+    /** Pages eligible for anchor matching. @defaultValue `"any"` */
     readonly page?: PageSelector;
+    /** Zero-based matching anchor occurrence. @defaultValue `0` */
     readonly occurrence?: number;
+    /** Whether literal anchor matching preserves case. @defaultValue `false` */
     readonly caseSensitive?: boolean;
   }): AnchorSelector {
     return {
@@ -214,11 +227,19 @@ export const select = {
 
 /** Built-in post-capture transformation builders. */
 export const transform = {
-  /** Returns a transform that trims leading and trailing whitespace. */
+  /**
+   * Returns a transform that trims leading and trailing whitespace.
+   *
+   * @returns A trim transform
+   */
   trim(): TransformDefinition {
     return { kind: "trim" };
   },
-  /** Returns a transform that collapses whitespace and trims the value. */
+  /**
+   * Returns a transform that collapses whitespace and trims the value.
+   *
+   * @returns A whitespace normalization transform
+   */
   normalizeWhitespace(): TransformDefinition {
     return { kind: "normalizeWhitespace" };
   },
@@ -227,6 +248,7 @@ export const transform = {
    *
    * @param search - Literal or regular-expression search value
    * @param replacement - Replacement text
+   * @returns A replacement transform
    */
   replace(search: string | RegExp, replacement: string): TransformDefinition {
     return { kind: "replace", search, replacement };
@@ -235,10 +257,13 @@ export const transform = {
    * Returns a localized number parsing transform.
    *
    * @param options - Decimal and grouping separators
+   * @returns A number parsing transform
    */
   number(
     options: {
+      /** Decimal separator replaced by `.` before parsing. @defaultValue `"."` */
       readonly decimalSeparator?: string;
+      /** Grouping separators removed before parsing. @defaultValue `[" ", "\u00a0", ","]` */
       readonly groupSeparators?: readonly string[];
     } = {},
   ): TransformDefinition {
@@ -253,6 +278,7 @@ export const transform = {
    *
    * @param format - Expected input date order
    * @param output - ISO date text or a JavaScript `Date`
+   * @returns A date parsing transform
    */
   date(
     format: "DD/MM/YYYY" | "MM/DD/YYYY" | "YYYY-MM-DD",
@@ -269,12 +295,19 @@ export const transform = {
    *
    * @param candidates - Explicit authoritative values
    * @param options - Edit-distance and normalization options
+   * @returns A closest-match transform
+   *
+   * @throws `TypeError` when no candidate is given or a candidate is empty
+   * @throws `RangeError` when `maxDistance` is not a non-negative integer
    */
   closestMatch(
     candidates: readonly string[],
     options: {
+      /** Maximum accepted edit distance. @defaultValue `1` */
       readonly maxDistance?: number;
+      /** Whether comparison ignores case. @defaultValue `true` */
       readonly ignoreCase?: boolean;
+      /** Whether comparison ignores combining diacritical marks. @defaultValue `true` */
       readonly ignoreDiacritics?: boolean;
     } = {},
   ): TransformDefinition {
@@ -298,6 +331,7 @@ export const transform = {
    *
    * @param name - Stable name included in field evidence
    * @param map - Synchronous or asynchronous value mapper
+   * @returns A custom transform
    */
   custom(name: string, map: (value: unknown) => unknown): TransformDefinition {
     return { kind: "custom", name, map };

@@ -1,3 +1,9 @@
+/**
+ * Builds a single-page US Letter PDF drawing one line of Helvetica text.
+ *
+ * @param text - Text to draw, escaped for a PDF literal string
+ * @returns The PDF bytes, including a valid cross-reference table
+ */
 export function minimalPdf(text: string): Uint8Array {
   const escaped = text.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
   const content = `BT /F1 24 Tf 72 720 Td (${escaped}) Tj ET`;

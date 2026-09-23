@@ -11,6 +11,15 @@ import type {
   TextToken,
 } from "../src/index.js";
 
+/**
+ * Builds a normalized bounding box with a typical word size by default.
+ *
+ * @param x - Horizontal position between `0` and `1`
+ * @param y - Vertical position between `0` and `1`
+ * @param width - Relative width
+ * @param height - Relative height
+ * @returns The bounding box
+ */
 export const box = (x: number, y: number, width = 0.1, height = 0.03): BoundingBox => ({
   x,
   y,
@@ -18,6 +27,16 @@ export const box = (x: number, y: number, width = 0.1, height = 0.03): BoundingB
   height,
 });
 
+/**
+ * Builds a positioned text token.
+ *
+ * @param text - Token text
+ * @param value - Normalized token box
+ * @param lineIndex - Line grouping index within the page
+ * @param source - Extraction method, which controls whether `confidence` is set
+ * @param confidence - OCR confidence, only applied to `ocr` tokens
+ * @returns The text token
+ */
 export const token = (
   text: string,
   value: BoundingBox,
@@ -32,12 +51,20 @@ export const token = (
   ...(source === "ocr" ? { confidence } : {}),
 });
 
+/** US Letter page returning fixed native tokens and counting renders. */
 class MockPage implements PdfPage {
   readonly width = 612;
   readonly height = 792;
   readonly number: number;
   renderCount = 0;
 
+  /**
+   * Creates a mock page.
+   *
+   * @param index - Zero-based page index
+   * @param nativeTokens - Tokens returned by {@link MockPage.extractText}
+   * @param bitmap - Bitmap returned by {@link MockPage.render}, a blank 10x10 image when omitted
+   */
   constructor(
     readonly index: number,
     private readonly nativeTokens: readonly TextToken[],
@@ -46,10 +73,21 @@ class MockPage implements PdfPage {
     this.number = index + 1;
   }
 
+  /**
+   * Returns the configured native tokens.
+   *
+   * @returns The native tokens passed to the constructor
+   */
   async extractText(): Promise<readonly TextToken[]> {
     return this.nativeTokens;
   }
 
+  /**
+   * Returns the configured bitmap and increments {@link MockPage.renderCount}.
+   *
+   * @param options - Render options, whose `dpi` is echoed on the default bitmap
+   * @returns The configured or default bitmap
+   */
   async render(options: PdfRenderOptions): Promise<PageBitmap> {
     this.renderCount += 1;
     return (
@@ -64,27 +102,47 @@ class MockPage implements PdfPage {
   }
 }
 
+/** Document serving pre-built mock pages and counting closes. */
 class MockDocument implements PdfDocument {
   readonly pageCount: number;
   closeCount = 0;
 
+  /**
+   * Creates a mock document.
+   *
+   * @param pages - Pages in document order
+   */
   constructor(readonly pages: readonly MockPage[]) {
     this.pageCount = pages.length;
   }
 
+  /**
+   * Returns a pre-built page.
+   *
+   * @param index - Zero-based page index
+   * @returns The page at that index
+   */
   async getPage(index: number): Promise<PdfPage> {
     return this.pages[index]!;
   }
 
+  /** Records the call by incrementing `closeCount`. */
   async close(): Promise<void> {
     this.closeCount += 1;
   }
 }
 
+/** PDF engine that always opens the same mock document and counts closes. */
 export class MockPdfEngine implements PdfEngine {
   readonly document: MockDocument;
   closeCount = 0;
 
+  /**
+   * Creates a mock PDF engine.
+   *
+   * @param pages - Native tokens for each page, in page order
+   * @param bitmaps - Optional render output for each page, by index
+   */
   constructor(
     pages: readonly (readonly TextToken[])[],
     bitmaps: readonly (PageBitmap | undefined)[] = [],
@@ -94,21 +152,41 @@ export class MockPdfEngine implements PdfEngine {
     );
   }
 
+  /**
+   * Returns the mock document regardless of input.
+   *
+   * @param _input - Ignored PDF bytes
+   * @param _options - Ignored open options
+   * @returns The shared mock document
+   */
   async open(_input: Uint8Array, _options?: PdfOpenOptions): Promise<PdfDocument> {
     return this.document;
   }
 
+  /** Records the call by incrementing `closeCount`. */
   async close(): Promise<void> {
     this.closeCount += 1;
   }
 }
 
+/** OCR engine returning scripted results in call order. */
 export class MockOcrEngine implements OcrEngine {
   recognizeCount = 0;
   closeCount = 0;
 
+  /**
+   * Creates a mock OCR engine.
+   *
+   * @param results - Results returned by successive {@link MockOcrEngine.recognize} calls
+   */
   constructor(private readonly results: readonly OcrResult[]) {}
 
+  /**
+   * Returns the next scripted result.
+   *
+   * @returns The result matching the current call count
+   * @throws `Error` when more calls are made than results were scripted
+   */
   async recognize(): Promise<OcrResult> {
     const result = this.results[this.recognizeCount];
     this.recognizeCount += 1;
@@ -116,6 +194,7 @@ export class MockOcrEngine implements OcrEngine {
     return result;
   }
 
+  /** Records the call by incrementing `closeCount`. */
   async close(): Promise<void> {
     this.closeCount += 1;
   }
