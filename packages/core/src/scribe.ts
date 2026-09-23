@@ -34,19 +34,43 @@ export const DEFAULT_LIMITS: ScribeLimits = {
   concurrency: 1,
 };
 
+/** Minimum native alphanumeric characters below which a page is considered image-only. */
 const MIN_NATIVE_CHARACTERS = 16;
+/** Render density used for OCR bitmaps. */
 const OCR_DPI = 300;
 
+/**
+ * Throws when a cancellation signal has already fired.
+ *
+ * @param signal - Optional cancellation signal
+ * @throws {@link AbortError} when the signal is aborted, with its reason as `cause`
+ */
 function abortIfNeeded(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw new AbortError("The extraction was aborted.", { cause: signal.reason });
   }
 }
 
+/**
+ * Views binary input as bytes without copying.
+ *
+ * @param input - PDF bytes as an `ArrayBuffer` or `Uint8Array`
+ * @returns A `Uint8Array` over the same memory
+ */
 function bytesFrom(input: BinaryInput): Uint8Array {
   return input instanceof Uint8Array ? input : new Uint8Array(input);
 }
 
+/**
+ * Maps values with an async function while bounding the number of in-flight calls.
+ *
+ * @typeParam T - Input value type
+ * @typeParam U - Mapped value type
+ * @param values - Values to map
+ * @param concurrency - Maximum number of concurrent `map` calls
+ * @param map - Async mapper applied to each value
+ * @returns Mapped values in input order
+ */
 async function mapConcurrent<T, U>(
   values: readonly T[],
   concurrency: number,
@@ -64,6 +88,7 @@ async function mapConcurrent<T, U>(
   return output;
 }
 
+/** Per-page state updated as native extraction and OCR progress. */
 interface MutablePageState {
   readonly page: PdfPage;
   nativeTokens: readonly TextToken[];
@@ -74,14 +99,33 @@ interface MutablePageState {
   ocrSkippedReason?: "blank-page";
 }
 
+/**
+ * Counts Unicode letters and digits across tokens.
+ *
+ * @param tokens - Tokens to inspect
+ * @returns Number of alphanumeric characters
+ */
 function nativeCharacterCount(tokens: readonly TextToken[]): number {
   return tokens.reduce((sum, token) => sum + (token.text.match(/[\p{L}\p{N}]/gu)?.length ?? 0), 0);
 }
 
+/**
+ * Estimates the pixel count of a page rendered at a given density.
+ *
+ * @param page - Page whose size is expressed in PDF points
+ * @param dpi - Target render density
+ * @returns Width times height in pixels, rounded up per dimension
+ */
 function estimatedPixels(page: PdfPage, dpi: number): number {
   return Math.ceil((page.width * dpi) / 72) * Math.ceil((page.height * dpi) / 72);
 }
 
+/**
+ * Converts internal page state into public page diagnostics.
+ *
+ * @param states - Final page states
+ * @returns One diagnostic per page, in page order
+ */
 function pageDiagnostics(states: readonly MutablePageState[]): readonly PageDiagnostic[] {
   return states.map((state) => ({
     page: state.page.number,
@@ -94,6 +138,18 @@ function pageDiagnostics(states: readonly MutablePageState[]): readonly PageDiag
   }));
 }
 
+/**
+ * Determines whether a rendered page is visually blank.
+ *
+ * @remarks
+ * A pixel counts as ink when its luminance, composited over white, is below 245. The page is blank
+ * when at most 0.005% of pixels (and never fewer than 8) are ink.
+ *
+ * @param bitmap - Grayscale or RGBA page render
+ * @param signal - Optional cancellation signal, checked every million pixels
+ * @returns `true` when the page contains no meaningful ink
+ * @throws {@link AbortError} when the signal fires during the scan
+ */
 function isBlankBitmap(bitmap: PageBitmap, signal?: AbortSignal): boolean {
   const pixelCount = bitmap.width * bitmap.height;
   const maximumNonWhitePixels = Math.max(8, Math.floor(pixelCount * 0.000_05));
@@ -121,10 +177,22 @@ function isBlankBitmap(bitmap: PageBitmap, signal?: AbortSignal): boolean {
   return true;
 }
 
+/**
+ * Projects page state into the input expected by the profile extractor.
+ *
+ * @param states - Current page states
+ * @returns Page numbers with their current tokens
+ */
 function asExtractPages(states: readonly MutablePageState[]): readonly ExtractPage[] {
   return states.map((state) => ({ number: state.page.number, tokens: state.tokens }));
 }
 
+/**
+ * Converts Standard Schema issues into validator-independent issues.
+ *
+ * @param issues - Issues reported by the profile schema
+ * @returns Issues whose path segments are plain property keys
+ */
 function normalizeIssues(issues: readonly StandardSchemaV1.Issue[]) {
   return issues.map((issue) => ({
     message: issue.message,
@@ -179,6 +247,16 @@ export function createScribe(options: CreateScribeOptions): Scribe {
   let closed = false;
   let closePromise: Promise<void> | undefined;
 
+  /**
+   * Renders a page, skips it when blank, and replaces its tokens with OCR output.
+   *
+   * @param state - Page state updated in place
+   * @param profile - Profile providing the OCR languages
+   * @param signal - Optional cancellation signal
+   * @returns A promise that resolves once the page state is updated
+   * @throws {@link OcrError} when no OCR engine is configured or recognition fails
+   * @throws {@link LimitExceededError} when the render would exceed `maxPixelsPerPage`
+   */
   const runOcr = async (
     state: MutablePageState,
     profile: DocumentProfile,
@@ -225,6 +303,7 @@ export function createScribe(options: CreateScribeOptions): Scribe {
   };
 
   return {
+    /** {@inheritDoc Scribe.parse} */
     async parse<S extends StandardSchemaV1>(
       input: BinaryInput,
       profile: DocumentProfile<S>,
@@ -359,6 +438,7 @@ export function createScribe(options: CreateScribeOptions): Scribe {
       }
     },
 
+    /** {@inheritDoc Scribe.close} */
     close(): Promise<void> {
       if (closePromise) return closePromise;
       closed = true;

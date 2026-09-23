@@ -6,6 +6,12 @@ const root = new URL("..", import.meta.url).pathname;
 const parser = new TSDocParser();
 const failures = [];
 
+/**
+ * Lists TypeScript files below a directory.
+ *
+ * @param {string} directory - Absolute directory to walk recursively
+ * @returns {string[]} Absolute paths of every `.ts` file found
+ */
 function sourceFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);

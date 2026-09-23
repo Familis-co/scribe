@@ -17,6 +17,12 @@ export abstract class ScribeError extends Error {
   /** Stable machine-readable error code. */
   abstract readonly code: ScribeErrorCode;
 
+  /**
+   * Creates a Scribe error whose `name` matches the concrete subclass.
+   *
+   * @param message - Human-readable explanation
+   * @param options - Native error options, typically carrying the underlying `cause`
+   */
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;
@@ -115,6 +121,12 @@ export class ValidationError extends ScribeError {
 export class AbortError extends ScribeError {
   readonly code = "ABORTED" as const;
 
+  /**
+   * Creates an abort error.
+   *
+   * @param message - Human-readable explanation
+   * @param options - Native error options, typically carrying the signal's abort reason as `cause`
+   */
   constructor(message = "The extraction was aborted.", options?: ErrorOptions) {
     super(message, options);
   }
@@ -124,6 +136,7 @@ export class AbortError extends ScribeError {
 export class DisposedError extends ScribeError {
   readonly code = "DISPOSED" as const;
 
+  /** Creates a disposed-instance error with a fixed message. */
   constructor() {
     super("This Scribe instance has already been closed.");
   }
