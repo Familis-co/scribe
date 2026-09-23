@@ -1,41 +1,103 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  # The release workflow calls this one for main, so pushes there are already
+  # covered. The Changesets version branch only gets checks from a push, and
+  # only when the version job pushes with a token that can trigger workflows.
+  push:
+    branches: ["changeset-release/**"]
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  # `github.workflow` keeps a called run in a group of its own, so a release
+  # never contends with the pull request run it grew out of.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # A superseded pull request run is worth cancelling. A run that gates a
+  # release is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Nothing in CI needs the git hooks the root `prepare` script installs.
+  LEFTHOOK: "0"
 
 jobs:
-  node:
-    name: Node ${{ matrix.node }}
+  static:
+    name: Format, lint, docs and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup
+
+      - name: Check formatting
+        run: pnpm run format:check
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Check TSDoc
+        run: pnpm run docs:check
+
+      # Adapters and examples resolve @familis/scribe through its published
+      # exports, so the declarations must exist before they can be typechecked.
+      - name: Build
+        run: pnpm run build
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+  test:
+    name: Test on Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node: [22, 24]
+        node: [22, 24, 26]
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 12.5.1
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup
         with:
           node-version: ${{ matrix.node }}
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm check
+
+      # The adapter tests import @familis/scribe from its build output.
+      - name: Build
+        run: pnpm run build
+
+      - name: Test
+        run: pnpm run test
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Check the packed tarballs in an isolated project
+        run: pnpm run packages:check
 
   bun:
     name: Bun
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 12.5.1
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-      - uses: oven-sh/setup-bun@v2
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: bun test ./packages/core/test/bun-smoke.bun.ts
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Smoke test the ESM build
+        run: bun test ./packages/core/test/bun-smoke.bun.ts

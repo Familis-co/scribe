@@ -56,9 +56,10 @@ Releases are driven by [Changesets](https://changesets.dev) and
 
 1. Add a changeset to every pull request that changes a published package with `pnpm changeset`.
    The three packages share one version.
-2. When changesets land on `main`, the workflow opens or updates a `chore: release packages` pull
-   request that bumps versions and writes changelogs.
-3. Merging that pull request runs `pnpm check`, packs the tarballs once, publishes them to npm
+2. Every push to `main` first runs the full CI workflow. When changesets are pending, the release
+   workflow then opens or updates a `chore: release packages` pull request that bumps versions and
+   writes changelogs.
+3. Merging that pull request runs CI again, packs the tarballs once, publishes them to npm
    through trusted publishing with provenance, creates the Git tags and GitHub releases, then
    mirrors the same tarballs to GitHub Packages.
 
