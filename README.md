@@ -1,5 +1,8 @@
 # @familis/scribe
 
+[![CI](https://github.com/Familis-co/scribe/actions/workflows/ci.yml/badge.svg)](https://github.com/Familis-co/scribe/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Familis-co/scribe)](LICENSE)
+
 A Node.js and Bun monorepo for deterministic PDF text extraction, local OCR, declarative
 document profiles, and Standard Schema validation.
 
@@ -25,6 +28,11 @@ pnpm install
 pnpm check
 pnpm deps:check
 ```
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/); Lefthook runs Oxfmt
+and Oxlint on staged files before each commit, then typecheck and tests before a push. See
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and the
+[security policy](.github/SECURITY.md) to report a vulnerability.
 
 See `examples/invoice-zod` for a complete Zod profile. The packages deliberately target server
 runtimes only; browser and edge bundles are outside the v1 support policy.

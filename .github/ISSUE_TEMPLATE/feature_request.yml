@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a transform, a selector, an adapter option or an API Scribe does not cover yet
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scribe favours deterministic, explainable extraction. Proposals that keep every value traceable to its evidence are the easiest to accept.
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - "@familis/scribe (pipeline, profiles, validation)"
+        - "@familis/scribe/testing (adapter contract checks)"
+        - "@familis/scribe-pdfium (PDFium adapter)"
+        - "@familis/scribe-tesseract (Tesseract.js adapter)"
+        - A new adapter
+        - Across several packages
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What kind of document or field are you trying to extract that Scribe makes hard or impossible today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API
+      description: How it would look in a profile or at the call site. A rough sketch is fine.
+      render: ts
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you are using now, such as a `transform.custom`, and why they fall short.
