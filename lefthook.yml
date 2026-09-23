@@ -1,0 +1,14 @@
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      glob: "*.{js,mjs,cjs,ts,mts,cts,json,jsonc,yaml,yml,md}"
+      run: pnpm exec oxfmt --check {staged_files}
+    lint:
+      glob: "*.{js,mjs,cjs,ts,mts,cts}"
+      run: pnpm exec oxlint --type-aware --report-unused-disable-directives {staged_files}
+
+pre-push:
+  commands:
+    verify:
+      run: pnpm typecheck && pnpm test

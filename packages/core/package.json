@@ -1,0 +1,55 @@
+{
+  "name": "@familis/scribe",
+  "version": "0.1.0",
+  "description": "Engine-independent structured PDF extraction pipeline",
+  "homepage": "https://github.com/familis-co/scribe/tree/main/packages/core#readme",
+  "bugs": {
+    "url": "https://github.com/familis-co/scribe/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/familis-co/scribe.git",
+    "directory": "packages/core"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "require": "./dist/testing.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/testing.ts --format esm,cjs --sourcemap --clean && tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@standard-schema/spec": "catalog:"
+  },
+  "devDependencies": {
+    "zod": "catalog:"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

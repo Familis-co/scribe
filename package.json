@@ -1,0 +1,53 @@
+{
+  "name": "@familis/scribe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Structured PDF extraction and OCR for Node.js and Bun",
+  "homepage": "https://github.com/familis-co/scribe#readme",
+  "bugs": {
+    "url": "https://github.com/familis-co/scribe/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/familis-co/scribe.git"
+  },
+  "type": "module",
+  "scripts": {
+    "preinstall": "npx only-allow pnpm",
+    "prepare": "node scripts/install-hooks.mjs",
+    "build": "pnpm -r --filter './packages/**' --filter './examples/**' --sort --workspace-concurrency=1 build",
+    "check": "pnpm format:check && pnpm lint && pnpm docs:check && pnpm build && pnpm typecheck && pnpm test && pnpm packages:check",
+    "format": "oxfmt --write",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint --type-aware --report-unused-disable-directives",
+    "packages:check": "node scripts/check-packages.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r --filter './packages/**' --filter './examples/**' --sort --workspace-concurrency=1 typecheck",
+    "changeset": "changeset",
+    "deps:check": "taze -r --include-locked",
+    "deps:update": "taze -r --include-locked --write --maturity-period 3",
+    "docs:check": "node scripts/check-tsdoc.mjs",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "3.0.3",
+    "@microsoft/tsdoc": "^0.17.0",
+    "@types/node": "22.20.4",
+    "lefthook": "2.1.14",
+    "oxfmt": "0.70.0",
+    "oxlint": "1.85.0",
+    "oxlint-tsgolint": "7.0.2002",
+    "taze": "21.1.0",
+    "tsup": "8.5.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1",
+    "zod": "4.6.5"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@12.5.1"
+}

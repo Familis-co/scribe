@@ -1,0 +1,17 @@
+{
+  "name": "@familis/scribe-example-hybrid-pdf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --sourcemap --clean",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@familis/scribe": "workspace:^",
+    "@familis/scribe-pdfium": "workspace:^",
+    "@familis/scribe-tesseract": "workspace:^",
+    "zod": "catalog:"
+  }
+}

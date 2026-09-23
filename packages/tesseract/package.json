@@ -1,0 +1,49 @@
+{
+  "name": "@familis/scribe-tesseract",
+  "version": "0.1.0",
+  "description": "Tesseract.js OCR adapter for @familis/scribe",
+  "homepage": "https://github.com/familis-co/scribe/tree/main/packages/tesseract#readme",
+  "bugs": {
+    "url": "https://github.com/familis-co/scribe/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/familis-co/scribe.git",
+    "directory": "packages/tesseract"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --sourcemap --clean && tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@familis/scribe": "workspace:^",
+    "sharp": "catalog:",
+    "tesseract.js": "catalog:"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
