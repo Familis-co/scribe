@@ -21,16 +21,33 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "testing": [
+        "./dist/testing.d.cts"
+      ]
+    }
+  },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./testing": {
-      "types": "./dist/testing.d.ts",
-      "import": "./dist/testing.js",
-      "require": "./dist/testing.cjs"
+      "import": {
+        "types": "./dist/testing.d.ts",
+        "default": "./dist/testing.js"
+      },
+      "require": {
+        "types": "./dist/testing.d.cts",
+        "default": "./dist/testing.cjs"
+      }
     },
     "./package.json": "./package.json"
   },
@@ -38,7 +55,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsup src/index.ts src/testing.ts --format esm,cjs --sourcemap --clean && tsc -p tsconfig.build.json",
+    "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "prepack": "pnpm build"

@@ -19,7 +19,7 @@ for (const name of packages) {
     throw new Error(`${manifest.name}: publishConfig.access must be public`);
   }
 
-  for (const target of ["dist/index.js", "dist/index.cjs", "dist/index.d.ts"]) {
+  for (const target of ["dist/index.js", "dist/index.cjs", "dist/index.d.ts", "dist/index.d.cts"]) {
     if (!existsSync(join(directory, target))) {
       throw new Error(`${manifest.name}: missing ${target}`);
     }
@@ -34,6 +34,10 @@ for (const name of packages) {
   archives[manifest.name] = isAbsolute(archiveName)
     ? archiveName
     : join(archiveDirectory, archiveName);
+
+  // Fails when a resolution mode sees types that disagree with the JavaScript it loads, such as
+  // ESM declarations for the CommonJS build.
+  execFileSync("pnpm", ["exec", "attw", archives[manifest.name]], { cwd: root, stdio: "inherit" });
 }
 
 const consumerDirectory = mkdtempSync(join(tmpdir(), "scribe-consumer-"));
@@ -103,4 +107,4 @@ try {
   rmSync(consumerDirectory, { force: true, recursive: true });
 }
 
-console.log("Packed ESM/CommonJS imports and the PDFium WASM asset are valid in isolation.");
+console.log("Packed types, ESM/CommonJS imports and the PDFium WASM asset are valid in isolation.");
