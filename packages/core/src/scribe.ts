@@ -9,7 +9,7 @@ import {
   ScribeError,
   ValidationError,
 } from "./errors.js";
-import { extractProfile, type ExtractPage, type ProfileExtraction } from "./extract.js";
+import { extractProfile, usesRules, type ExtractPage, type ProfileExtraction } from "./extract.js";
 import { centerY, visualLines } from "./lines.js";
 import type { DocumentProfile, OcrRegion } from "./profile.js";
 import type {
@@ -21,6 +21,7 @@ import type {
   OcrEngine,
   PageBitmap,
   PageDiagnostic,
+  PageRules,
   ParseOptions,
   PdfDocument,
   PdfPage,
@@ -94,6 +95,7 @@ async function mapConcurrent<T, U>(
 /** Per-page state updated as native extraction and OCR progress. */
 interface MutablePageState {
   readonly page: PdfPage;
+  readonly rules?: PageRules;
   nativeTokens: readonly TextToken[];
   tokens: readonly TextToken[];
   source: "native" | "ocr" | "mixed";
@@ -314,10 +316,14 @@ function isBlankBitmap(bitmap: PageBitmap, signal?: AbortSignal): boolean {
  * Projects page state into the input expected by the profile extractor.
  *
  * @param states - Current page states
- * @returns Page numbers with their current tokens
+ * @returns Page numbers with their current tokens and rules
  */
 function asExtractPages(states: readonly MutablePageState[]): readonly ExtractPage[] {
-  return states.map((state) => ({ number: state.page.number, tokens: state.tokens }));
+  return states.map((state) => ({
+    number: state.page.number,
+    tokens: state.tokens,
+    ...(state.rules ? { rules: state.rules } : {}),
+  }));
 }
 
 /**
@@ -578,6 +584,7 @@ export function createScribe(options: CreateScribeOptions): Scribe {
          */
         const ocrAllowed = (state: MutablePageState): boolean =>
           !regions || regions.has(state.page.number);
+        const readRules = usesRules(profile.fields);
 
         const pages = await mapConcurrent(
           Array.from({ length: document.pageCount }, (_, index) => index),
@@ -585,17 +592,24 @@ export function createScribe(options: CreateScribeOptions): Scribe {
           async (index): Promise<MutablePageState> => {
             abortIfNeeded(parseOptions.signal);
             const page = await document.getPage(index);
-            if (mode === "always" && !regions) {
-              return { page, nativeTokens: [], tokens: [], source: "native", durationMs: 0 };
-            }
             const started = performance.now();
+            let rules: PageRules | undefined;
+            try {
+              if (readRules && page.rules) rules = await page.rules(parseOptions.signal);
+            } catch (cause) {
+              if (cause instanceof ScribeError) throw cause;
+              throw new PdfEngineError(`Rule extraction failed on page ${page.number}.`, { cause });
+            }
+            const base = { page, source: "native" as const, ...(rules ? { rules } : {}) };
+            if (mode === "always" && !regions) {
+              return { ...base, nativeTokens: [], tokens: [], durationMs: 0 };
+            }
             try {
               const tokens = await page.extractText(parseOptions.signal);
               return {
-                page,
+                ...base,
                 nativeTokens: tokens,
                 tokens,
-                source: "native",
                 durationMs: performance.now() - started,
               };
             } catch (cause) {

@@ -3,6 +3,7 @@ import type {
   OcrEngine,
   OcrResult,
   PageBitmap,
+  PageRules,
   PdfDocument,
   PdfEngine,
   PdfOpenOptions,
@@ -57,6 +58,8 @@ class MockPage implements PdfPage {
   readonly height = 792;
   readonly number: number;
   renderCount = 0;
+  rulesCount = 0;
+  readonly rules?: () => Promise<PageRules>;
 
   /**
    * Creates a mock page.
@@ -64,13 +67,21 @@ class MockPage implements PdfPage {
    * @param index - Zero-based page index
    * @param nativeTokens - Tokens returned by {@link MockPage.extractText}
    * @param bitmap - Bitmap returned by {@link MockPage.render}, a blank 10x10 image when omitted
+   * @param rules - Rules returned by `rules()`, which is left undefined when omitted
    */
   constructor(
     readonly index: number,
     private readonly nativeTokens: readonly TextToken[],
     private readonly bitmap?: PageBitmap,
+    rules?: PageRules,
   ) {
     this.number = index + 1;
+    if (rules) {
+      this.rules = async () => {
+        this.rulesCount += 1;
+        return rules;
+      };
+    }
   }
 
   /**
@@ -142,13 +153,15 @@ export class MockPdfEngine implements PdfEngine {
    *
    * @param pages - Native tokens for each page, in page order
    * @param bitmaps - Optional render output for each page, by index
+   * @param rules - Optional page rules for each page, by index
    */
   constructor(
     pages: readonly (readonly TextToken[])[],
     bitmaps: readonly (PageBitmap | undefined)[] = [],
+    rules: readonly (PageRules | undefined)[] = [],
   ) {
     this.document = new MockDocument(
-      pages.map((tokens, index) => new MockPage(index, tokens, bitmaps[index])),
+      pages.map((tokens, index) => new MockPage(index, tokens, bitmaps[index], rules[index])),
     );
   }
 
