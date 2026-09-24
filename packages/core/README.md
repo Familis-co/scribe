@@ -9,7 +9,7 @@ It does not include a PDF or OCR implementation. Install the adapters you need s
 ## Features
 
 - Declarative profiles for documents that share a layout.
-- Fixed-region and anchor-relative selectors using normalized coordinates.
+- Fixed-region, anchor-relative and line-scoped anchor selectors using normalized coordinates.
 - Scalar, nested, and repeated fields.
 - Regex captures and built-in transformations.
 - Standard Schema validation, including asynchronous validators and Zod 4.
@@ -140,6 +140,23 @@ select.relativeToAnchor({
 
 The offset starts at the anchor's top-left position. Its width and height remain normalized page
 dimensions.
+
+Select the value printed after a label on the same line:
+
+```ts
+select.afterAnchor({
+  text: /Concerne\s*:/iu,
+  stopAt: /Date\s*:/iu, // optional
+  page: 1, // default "any"
+  occurrence: 0, // default 0
+});
+```
+
+`afterAnchor` selects the tokens on the anchor's visual line that sit to the right of the anchor's
+last token. It stops before the first token where `stopAt` matches, so a second label on the same
+line (`Reference: 1234567  Concerne: …`) is left out. Unlike a fixed offset box, it never catches the
+start of the next line when OCR boxes shift vertically. `page` and `occurrence` behave as in
+`relativeToAnchor`, and literal `text` and `stopAt` values ignore case unless `caseSensitive` is set.
 
 ### Fields and captures
 
