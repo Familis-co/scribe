@@ -448,7 +448,7 @@ defineProfile({
   languages: ["fra"],
   ocr: {
     // Only these regions are ever sent to the OCR engine.
-    regions: [{ page: 1, box: { x: 0.04, y: 0.22, width: 0.92, height: 0.16 } }],
+    regions: [{ page: 1, box: { x: 0.04, y: 0.22, width: 0.92, height: 0.16 }, renderDpi: 96 }],
   },
   schema,
   fields,
@@ -463,9 +463,22 @@ A region's `page` accepts the same values as a selector's. When a profile declar
 | `always` | OCR every declared region. Pages without a region keep their native text.                                                    |
 | `never`  | Unchanged: native text only.                                                                                                 |
 
-Each page is rendered once, then every region is cropped out of the render and recognized on its
-own. Blank regions are skipped. OCR token boxes are mapped back to page coordinates, then merged
-with the native text layer:
+Each region is read from the best source available, in this order:
+
+1. **Embedded images.** When the PDF adapter lists the page's images (`@familis/scribe-pdfium`
+   does), every image overlapping the region is cropped to the region and recognized at its native
+   resolution. Rendering a page resamples an embedded bitmap and smears its glyphs, so its own
+   pixels read better. Images under 4,096 pixels, such as logos and rules, and images above
+   `maxPixelsPerPage` are ignored.
+2. **The region alone, rendered.** When no image overlaps it, such as text drawn as vector
+   outlines, the region is rendered on its own at `renderDpi` (300 by default), so no pixel outside
+   it is allocated. Pair a low `renderDpi` with an OCR adapter that upscales, such as
+   `@familis/scribe-tesseract`, to recognize a 96 DPI bitmap at its native density.
+3. **The whole page, cropped.** An adapter that cannot render a clipped area returns the whole page,
+   which is rendered once per density and cropped for each region.
+
+Blank inputs are skipped. OCR token boxes are mapped back to page coordinates, then merged with the
+native text layer:
 
 - every native token is kept, because native text is exact;
 - an OCR token is dropped when its center falls inside a native token's box, which happens when a
@@ -474,8 +487,9 @@ with the native text layer:
   visual line read as one line.
 
 The page diagnostic reports `source: "mixed"` when OCR tokens were merged into native text (or
-`"ocr"` when the page had no native text), and `ocrRegionCount` with the number of regions
-recognized. `maxPixelsPerPage` still applies to the page render.
+`"ocr"` when the page had no native text), `ocrRegionCount` with the number of regions recognized,
+and `ocrImageCount` with the number of embedded images recognized. `maxPixelsPerPage` applies to
+each region's render, or to the whole page when the adapter cannot clip.
 
 ## Result and evidence
 
@@ -493,8 +507,8 @@ raw text, `native` or `ocr` method, optional confidence, and transformations app
 fuzzy anchor located the value, `anchor` holds the label it matched and its score.
 
 Page diagnostics report the final text source (`native`, `ocr` or `mixed`), native character
-counts, final token counts, timing, OCR confidence, the number of OCR regions recognized, and
-whether OCR was skipped for a blank page.
+counts, final token counts, timing, OCR confidence, the number of OCR regions and embedded images
+recognized, and whether OCR was skipped for a blank page.
 
 ## Limits
 
@@ -563,6 +577,12 @@ are available from the testing export:
 ```ts
 import { verifyOcrEngineContract, verifyPdfEngineContract } from "@familis/scribe/testing";
 ```
+
+`PdfPage.images()` is optional too. An adapter that implements it returns the page's upright raster
+images with their normalized placement and native pixels, whose `dpi` is the density of their
+placement. `PdfRenderOptions.clip` asks for a normalized area only: an adapter that honors it
+renders that area, widened to whole pixels of the full-page render, and reports it as
+`PageBitmap.box`; one that ignores it renders the whole page. The contract checks both when present.
 
 `PdfPage.rules()` is optional. A PDF adapter that implements it returns the page's vertical and
 horizontal rules in normalized coordinates, sorted by position, and `field.table` uses them as

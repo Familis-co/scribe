@@ -51,6 +51,19 @@ export interface PageBitmap {
   readonly format: "gray8" | "rgba8";
   /** Pixel density of the rendered image when it is known. */
   readonly dpi?: number;
+  /**
+   * Normalized page area the bitmap covers, set by a render that honored
+   * {@link PdfRenderOptions.clip}. Omitted, the bitmap covers the whole page.
+   */
+  readonly box?: BoundingBox;
+}
+
+/** A raster image embedded in a page, at its native resolution. */
+export interface PdfPageImage {
+  /** Placement on the page, normalized, top-left origin. */
+  readonly box: BoundingBox;
+  /** Native pixels of the image, whose `dpi` is the effective density of its placement. */
+  readonly bitmap: PageBitmap;
 }
 
 /** A straight line drawn on a page, such as a table border, in normalized coordinates. */
@@ -77,6 +90,16 @@ export interface PdfRenderOptions {
   readonly dpi: number;
   /** Whether to render one grayscale byte per pixel. */
   readonly grayscale: boolean;
+  /**
+   * Normalized page area to render instead of the whole page.
+   *
+   * @remarks
+   * An adapter that honors it allocates only this area, widened to whole pixels of the full-page
+   * render at `dpi` (`floor` of the left and top edges, `ceil` of the right and bottom edges), and
+   * reports the covered area as {@link PageBitmap.box}. An adapter that ignores it renders the whole
+   * page and leaves `box` unset.
+   */
+  readonly clip?: BoundingBox;
   /** Signal used to cancel rendering. */
   readonly signal?: AbortSignal;
 }
@@ -115,6 +138,16 @@ export interface PdfPage {
    * @returns The page's vertical and horizontal rules
    */
   rules?(signal?: AbortSignal): Promise<PageRules>;
+  /**
+   * Lists the raster images embedded in the page, used to OCR them at their native resolution.
+   *
+   * @remarks
+   * Optional: adapters that cannot read image objects omit the method.
+   *
+   * @param signal - Optional cancellation signal
+   * @returns The page's upright embedded images
+   */
+  images?(signal?: AbortSignal): Promise<readonly PdfPageImage[]>;
 }
 
 /** An open PDF document whose resources must be released with {@link PdfDocument.close}. */
@@ -287,6 +320,8 @@ export interface PageDiagnostic {
   readonly ocrSkippedReason?: "blank-page";
   /** Number of declared OCR regions recognized on the page, when the profile declares regions. */
   readonly ocrRegionCount?: number;
+  /** Number of embedded images recognized at their native resolution, when the profile declares regions. */
+  readonly ocrImageCount?: number;
 }
 
 /**

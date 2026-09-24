@@ -203,6 +203,12 @@ export interface OcrRegion {
   readonly page: PageSelector;
   /** Normalized rectangle with a top-left origin. */
   readonly box: BoundingBox;
+  /**
+   * Density at which the region is rendered when no embedded image covers it.
+   *
+   * @defaultValue `300`
+   */
+  readonly renderDpi?: number;
 }
 
 /** OCR options declared by a profile. */
@@ -211,8 +217,9 @@ export interface ProfileOcrOptions {
    * The only page areas ever sent to the OCR engine.
    *
    * @remarks
-   * When set, OCR crops these regions out of the page render and merges the recognized tokens with
-   * the native text layer instead of replacing it. Pages without a region are never OCR'd.
+   * When set, OCR reads each region from the embedded images it overlaps, at their native
+   * resolution, or else from a render of the region alone, and merges the recognized tokens with the
+   * native text layer instead of replacing it. Pages without a region are never OCR'd.
    */
   readonly regions?: readonly OcrRegion[];
 }
@@ -773,7 +780,8 @@ export const transform = {
  *
  * @throws `TypeError` when no non-empty OCR language is declared, `ocr.regions` is empty, or
  * `identify` declares neither a non-empty `text` nor a `test`, or an empty literal
- * @throws `RangeError` when an OCR region has an invalid page or a box outside the page
+ * @throws `RangeError` when an OCR region has an invalid page, a box outside the page, or a
+ * `renderDpi` that is not a positive number
  */
 export function defineProfile<S extends StandardSchemaV1>(
   profile: DocumentProfile<S>,
@@ -803,6 +811,12 @@ export function defineProfile<S extends StandardSchemaV1>(
       y + height > 1 + Number.EPSILON * 4
     ) {
       throw new RangeError("An OCR region box must be a non-empty rectangle inside the page.");
+    }
+    if (
+      region.renderDpi !== undefined &&
+      (!Number.isFinite(region.renderDpi) || region.renderDpi <= 0)
+    ) {
+      throw new RangeError("An OCR region renderDpi must be a positive number.");
     }
   }
   if (profile.identify) {

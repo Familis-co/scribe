@@ -106,8 +106,35 @@ regions or pages.
 The resulting bitmap records the requested DPI so OCR adapters can preserve the correct image
 density.
 
-The core package renders OCR pages in grayscale at 300 DPI and checks the configured pixel limit
-before allocating the bitmap.
+Pass `clip` to render a normalized area only. The bitmap is allocated for that area, widened to
+whole pixels of the full-page render, and `box` reports the page area it covers:
+
+```ts
+const band = await page.render({
+  dpi: 96,
+  grayscale: true,
+  clip: { x: 0.04, y: 0.22, width: 0.92, height: 0.16 },
+});
+// band.box: the exact normalized area rendered
+```
+
+The core package renders OCR regions this way, at their `renderDpi`, and whole pages in grayscale at
+300 DPI. It checks the configured pixel limit before allocating the bitmap.
+
+## Embedded images
+
+`page.images()` returns the raster images placed upright on the page, with their native pixels:
+
+```ts
+for (const image of await page.images()) {
+  image.box; // normalized placement
+  image.bitmap; // gray8 pixels as stored in the PDF, dpi = pixels per inch of the placement
+}
+```
+
+Core OCRs these pixels directly when an OCR region overlaps them, which reads better than a render
+that resamples them. Rotated, skewed and flipped images, and images nested in form XObjects, are not
+returned, so their regions fall back to a clipped render. Image masks are not applied.
 
 ## Passwords and errors
 
