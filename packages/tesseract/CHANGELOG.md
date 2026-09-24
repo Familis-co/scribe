@@ -1,5 +1,13 @@
 # @familis/scribe-tesseract
 
+## 0.2.1
+
+### Patch Changes
+
+- 3a65964: Stop writing a copy of the language data into the working directory. Without `cachePath`, the Tesseract adapter now turns the Tesseract.js cache off (`cacheMethod: "none"`) and reads `languageDataPath` directly; setting `cachePath` keeps the previous caching behaviour.
+- 2b91a47: Stop leaking a worker thread on every parse when Tesseract language data is missing. With a local `languageDataPath`, the adapter now checks that each requested `<lang>.traineddata` (or `.traineddata.gz`) file is readable before starting a worker, and rejects with an `OcrError` naming the missing file and the configured path. A worker that still fails to initialize, for example on corrupt data, is no longer retried on every call: the engine remembers the failure per language set, so at most one start leaks. Create a new engine once the data is fixed.
+- @familis/scribe@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes
