@@ -1,6 +1,6 @@
 {
   "name": "@familis/scribe-pdfium",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "PDFium adapter for @familis/scribe",
   "homepage": "https://github.com/familis-co/scribe/tree/main/packages/pdfium#readme",
   "bugs": {
