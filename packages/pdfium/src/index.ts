@@ -14,6 +14,7 @@ import {
   type PageBitmap,
   type PageRule,
   type PageRules,
+  type PdfPageImage,
   type PdfDocument,
   type PdfEngine,
   type PdfOpenOptions,
@@ -28,6 +29,14 @@ const PDFIUM_ERROR_PASSWORD = 4;
 const BYTES_PER_PIXEL = 4;
 /** `FPDF_PAGEOBJ_PATH`, the page object type of vector paths. */
 const PAGE_OBJECT_PATH = 2;
+/** `FPDF_PAGEOBJ_IMAGE`, the page object type of raster images. */
+const PAGE_OBJECT_IMAGE = 3;
+/** Bytes per pixel of each `FPDFBitmap_*` format, by format number: gray, BGR, BGRx and BGRA. */
+const FORMAT_BYTES: Readonly<Record<number, number>> = { 1: 1, 2: 3, 3: 4, 4: 4 };
+/** `FPDFBitmap_BGRA`, the only bitmap format whose fourth byte is alpha. */
+const FORMAT_BGRA = 4;
+/** Largest matrix skew, relative to its scale, of an image still read as upright. */
+const SKEW_TOLERANCE = 1e-3;
 /** `FPDF_SEGMENT_LINETO`, a straight path segment. */
 const SEGMENT_LINE = 0;
 /** `FPDF_SEGMENT_MOVETO`, the start of a subpath. */
@@ -371,22 +380,51 @@ class PdfiumPage implements PdfPage {
     };
   }
 
-  /** {@inheritDoc @familis/scribe#PdfPage.render} */
+  /**
+   * {@inheritDoc @familis/scribe#PdfPage.render}
+   *
+   * @throws `PdfEngineError` when PDFium cannot allocate the bitmap
+   */
   async render(options: PdfRenderOptions): Promise<PageBitmap> {
     this.#assertOpen();
     abortIfNeeded(options.signal);
-    const width = Math.max(1, Math.ceil((this.width * options.dpi) / 72));
-    const height = Math.max(1, Math.ceil((this.height * options.dpi) / 72));
+    const fullWidth = Math.max(1, Math.ceil((this.width * options.dpi) / 72));
+    const fullHeight = Math.max(1, Math.ceil((this.height * options.dpi) / 72));
+    const { clip } = options;
+    const left = clip ? Math.max(0, Math.floor(clip.x * fullWidth + 1e-6)) : 0;
+    const top = clip ? Math.max(0, Math.floor(clip.y * fullHeight + 1e-6)) : 0;
+    const right = clip
+      ? Math.min(fullWidth, Math.ceil((clip.x + clip.width) * fullWidth - 1e-6))
+      : fullWidth;
+    const bottom = clip
+      ? Math.min(fullHeight, Math.ceil((clip.y + clip.height) * fullHeight - 1e-6))
+      : fullHeight;
+    const width = Math.max(1, right - left);
+    const height = Math.max(1, bottom - top);
     const bitmap = this.module.FPDFBitmap_Create(width, height, 1);
     if (!bitmap)
       throw new PdfEngineError(`PDFium could not allocate a bitmap for page ${this.number}.`);
     try {
       this.module.FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xffffffff);
-      this.module.FPDF_RenderPageBitmap(bitmap, this.pagePointer, 0, 0, width, height, 0, 0);
+      if (clip) {
+        this.#renderClipped(bitmap, fullWidth, fullHeight, left, top, width, height);
+      } else {
+        this.module.FPDF_RenderPageBitmap(bitmap, this.pagePointer, 0, 0, width, height, 0, 0);
+      }
       abortIfNeeded(options.signal);
       const pointer = this.module.FPDFBitmap_GetBuffer(bitmap);
       const stride = this.module.FPDFBitmap_GetStride(bitmap);
       const source = heap(this.module).subarray(pointer, pointer + stride * height);
+      const area = clip
+        ? {
+            box: {
+              x: left / fullWidth,
+              y: top / fullHeight,
+              width: width / fullWidth,
+              height: height / fullHeight,
+            },
+          }
+        : {};
 
       if (!options.grayscale) {
         const rgba = new Uint8Array(width * height * BYTES_PER_PIXEL);
@@ -400,7 +438,7 @@ class PdfiumPage implements PdfPage {
             rgba[targetIndex + 3] = source[sourceIndex + 3]!;
           }
         }
-        return { data: rgba, width, height, format: "rgba8", dpi: options.dpi };
+        return { data: rgba, width, height, format: "rgba8", dpi: options.dpi, ...area };
       }
 
       const gray = new Uint8Array(width * height);
@@ -413,9 +451,169 @@ class PdfiumPage implements PdfPage {
           gray[y * width + x] = Math.round(0.114 * blue + 0.587 * green + 0.299 * red);
         }
       }
-      return { data: gray, width, height, format: "gray8", dpi: options.dpi };
+      return { data: gray, width, height, format: "gray8", dpi: options.dpi, ...area };
     } finally {
       this.module.FPDFBitmap_Destroy(bitmap);
+    }
+  }
+
+  /**
+   * {@inheritDoc @familis/scribe#PdfPage.images}
+   *
+   * @throws `PdfEngineError` when PDFium cannot read the page's objects
+   */
+  async images(signal?: AbortSignal): Promise<readonly PdfPageImage[]> {
+    this.#assertOpen();
+    abortIfNeeded(signal);
+    // Only upright images are returned: their native pixel rows run top to bottom on the page. A
+    // rotated, skewed or flipped image is left to the rendered fallback.
+    const images: PdfPageImage[] = [];
+    const scratch = this.module.pdfium.wasmExports.malloc(6 * Float32Array.BYTES_PER_ELEMENT);
+    /**
+     * Reads a 32-bit float written by PDFium into the scratch buffer.
+     *
+     * @param index - Float index within the scratch buffer
+     * @returns The float value
+     */
+    const float = (index: number): number =>
+      Number(this.module.pdfium.getValue(scratch + index * 4, "float"));
+    try {
+      const count = this.module.FPDFPage_CountObjects(this.pagePointer);
+      for (let index = 0; index < count; index += 1) {
+        abortIfNeeded(signal);
+        const object = this.module.FPDFPage_GetObject(this.pagePointer, index);
+        if (!object || this.module.FPDFPageObj_GetType(object) !== PAGE_OBJECT_IMAGE) continue;
+        if (!this.module.FPDFPageObj_GetMatrix(object, scratch)) continue;
+        const [a, b, c, d] = [float(0), float(1), float(2), float(3)];
+        if (
+          a <= 0 ||
+          d <= 0 ||
+          Math.abs(b) > a * SKEW_TOLERANCE ||
+          Math.abs(c) > d * SKEW_TOLERANCE
+        ) {
+          continue;
+        }
+        if (
+          !this.module.FPDFPageObj_GetBounds(
+            object,
+            scratch,
+            scratch + 4,
+            scratch + 8,
+            scratch + 12,
+          )
+        ) {
+          continue;
+        }
+        const [left, bottom, right, top] = [float(0), float(1), float(2), float(3)];
+        const bitmap = this.#imageBitmap(object);
+        if (!bitmap || right <= left) continue;
+        images.push({
+          box: {
+            x: clamp(left / this.width),
+            y: clamp(1 - top / this.height),
+            width: clamp((right - left) / this.width),
+            height: clamp((top - bottom) / this.height),
+          },
+          bitmap: { ...bitmap, dpi: (bitmap.width * 72) / (right - left) },
+        });
+      }
+    } finally {
+      this.module.pdfium.wasmExports.free(scratch);
+    }
+    return images;
+  }
+
+  /**
+   * Decodes an image object's native pixels to grayscale.
+   *
+   * @param object - Native `FPDF_PAGEOBJECT` image handle
+   * @returns The grayscale pixels, or `undefined` when PDFium cannot decode the image
+   */
+  #imageBitmap(object: number): PageBitmap | undefined {
+    const bitmap = this.module.FPDFImageObj_GetBitmap(object);
+    if (!bitmap) return undefined;
+    try {
+      const width = this.module.FPDFBitmap_GetWidth(bitmap);
+      const height = this.module.FPDFBitmap_GetHeight(bitmap);
+      const format = this.module.FPDFBitmap_GetFormat(bitmap);
+      const bytes = FORMAT_BYTES[format];
+      if (!bytes || width <= 0 || height <= 0) return undefined;
+      const pointer = this.module.FPDFBitmap_GetBuffer(bitmap);
+      const stride = this.module.FPDFBitmap_GetStride(bitmap);
+      const source = heap(this.module).subarray(pointer, pointer + stride * height);
+      const gray = new Uint8Array(width * height);
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const sourceIndex = y * stride + x * bytes;
+          if (bytes === 1) {
+            gray[y * width + x] = source[sourceIndex]!;
+            continue;
+          }
+          const luminance =
+            0.114 * source[sourceIndex]! +
+            0.587 * source[sourceIndex + 1]! +
+            0.299 * source[sourceIndex + 2]!;
+          // Transparent pixels are composited over white, as the page renders them.
+          const alpha = format === FORMAT_BGRA ? source[sourceIndex + 3]! / 255 : 1;
+          gray[y * width + x] = Math.round(255 - (255 - luminance) * alpha);
+        }
+      }
+      return { data: gray, width, height, format: "gray8" };
+    } finally {
+      this.module.FPDFBitmap_Destroy(bitmap);
+    }
+  }
+
+  /**
+   * Renders a rectangle of the full-page raster into a bitmap of that rectangle's size.
+   *
+   * @param bitmap - Native bitmap sized to the rectangle
+   * @param fullWidth - Width of the full-page raster in pixels
+   * @param fullHeight - Height of the full-page raster in pixels
+   * @param left - Left edge of the rectangle in full-page pixels
+   * @param top - Top edge of the rectangle in full-page pixels
+   * @param width - Rectangle width in pixels
+   * @param height - Rectangle height in pixels
+   */
+  #renderClipped(
+    bitmap: number,
+    fullWidth: number,
+    fullHeight: number,
+    left: number,
+    top: number,
+    width: number,
+    height: number,
+  ): void {
+    // FS_MATRIX { a, b, c, d, e, f } followed by FS_RECTF { left, top, right, bottom }.
+    const pointer = this.module.pdfium.wasmExports.malloc(10 * Float32Array.BYTES_PER_ELEMENT);
+    try {
+      // The matrix applies after the page's own display transform, which maps the page to a
+      // top-left-origin rectangle one pixel per point; scaling it to the full raster and shifting
+      // by the rectangle's corner lands the rectangle on the bitmap's origin.
+      const values = [
+        fullWidth / this.width,
+        0,
+        0,
+        fullHeight / this.height,
+        -left,
+        -top,
+        0,
+        0,
+        width,
+        height,
+      ];
+      values.forEach((value, index) =>
+        this.module.pdfium.setValue(pointer + index * 4, value, "float"),
+      );
+      this.module.FPDF_RenderPageBitmapWithMatrix(
+        bitmap,
+        this.pagePointer,
+        pointer,
+        pointer + 24,
+        0,
+      );
+    } finally {
+      this.module.pdfium.wasmExports.free(pointer);
     }
   }
 

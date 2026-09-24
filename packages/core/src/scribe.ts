@@ -46,6 +46,8 @@ export const DEFAULT_LIMITS: ScribeLimits = {
 const MIN_NATIVE_CHARACTERS = 16;
 /** Render density used for OCR bitmaps. */
 const OCR_DPI = 300;
+/** Embedded images with fewer pixels, such as logos and rules, are not worth recognizing. */
+const MIN_IMAGE_PIXELS = 4_096;
 
 /**
  * Throws when a cancellation signal has already fired.
@@ -107,6 +109,21 @@ interface MutablePageState {
   ocrConfidence?: number;
   ocrSkippedReason?: "blank-page";
   ocrRegionCount?: number;
+  ocrImageCount?: number;
+}
+
+/** A declared OCR region resolved on one page. */
+interface PageRegion {
+  /** Normalized page area. */
+  readonly box: BoundingBox;
+  /** Density of the region's render when no embedded image covers it. */
+  readonly dpi: number;
+}
+
+/** A bitmap to recognize and the normalized page area it covers. */
+interface OcrInput {
+  readonly bitmap: PageBitmap;
+  readonly box: BoundingBox;
 }
 
 /**
@@ -146,6 +163,7 @@ function pageDiagnostics(states: readonly MutablePageState[]): readonly PageDiag
     ...(state.ocrConfidence === undefined ? {} : { ocrConfidence: state.ocrConfidence }),
     ...(state.ocrSkippedReason === undefined ? {} : { ocrSkippedReason: state.ocrSkippedReason }),
     ...(state.ocrRegionCount === undefined ? {} : { ocrRegionCount: state.ocrRegionCount }),
+    ...(state.ocrImageCount === undefined ? {} : { ocrImageCount: state.ocrImageCount }),
   }));
 }
 
@@ -154,13 +172,13 @@ function pageDiagnostics(states: readonly MutablePageState[]): readonly PageDiag
  *
  * @param regions - Regions declared by the profile
  * @param pageCount - Number of pages in the document
- * @returns Region boxes by one-based page number, omitting pages without a region
+ * @returns Regions by one-based page number, omitting pages without a region
  */
 function regionsByPage(
   regions: readonly OcrRegion[],
   pageCount: number,
-): ReadonlyMap<number, readonly BoundingBox[]> {
-  const byPage = new Map<number, BoundingBox[]>();
+): ReadonlyMap<number, readonly PageRegion[]> {
+  const byPage = new Map<number, PageRegion[]>();
   for (const region of regions) {
     const pages =
       region.page === "any"
@@ -168,10 +186,39 @@ function regionsByPage(
         : [region.page === "first" ? 1 : region.page === "last" ? pageCount : region.page];
     for (const page of pages) {
       if (page < 1 || page > pageCount) continue;
-      byPage.set(page, [...(byPage.get(page) ?? []), region.box]);
+      byPage.set(page, [
+        ...(byPage.get(page) ?? []),
+        { box: region.box, dpi: region.renderDpi ?? OCR_DPI },
+      ]);
     }
   }
   return byPage;
+}
+
+/**
+ * Widens a normalized rectangle to whole pixels of an image.
+ *
+ * @param box - Normalized rectangle
+ * @param width - Image width in pixels
+ * @param height - Image height in pixels
+ * @returns Pixel edges, clamped to the image, with `right` and `bottom` exclusive
+ */
+function pixelEdges(
+  box: BoundingBox,
+  width: number,
+  height: number,
+): {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+} {
+  return {
+    left: Math.max(0, Math.floor(box.x * width + 1e-6)),
+    top: Math.max(0, Math.floor(box.y * height + 1e-6)),
+    right: Math.min(width, Math.ceil((box.x + box.width) * width - 1e-6)),
+    bottom: Math.min(height, Math.ceil((box.y + box.height) * height - 1e-6)),
+  };
 }
 
 /**
@@ -181,18 +228,12 @@ function regionsByPage(
  * The rectangle is widened to whole pixels, and the returned box is the exact area that was copied
  * so OCR coordinates can be mapped back onto the page.
  *
- * @param bitmap - Page render
+ * @param bitmap - Page render or embedded image
  * @param box - Normalized rectangle to copy
- * @returns The cropped bitmap and its normalized page area, or `undefined` when it has no pixels
+ * @returns The cropped bitmap and its normalized area, or `undefined` when it has no pixels
  */
-function cropBitmap(
-  bitmap: PageBitmap,
-  box: BoundingBox,
-): { readonly bitmap: PageBitmap; readonly box: BoundingBox } | undefined {
-  const left = Math.max(0, Math.floor(box.x * bitmap.width + 1e-6));
-  const top = Math.max(0, Math.floor(box.y * bitmap.height + 1e-6));
-  const right = Math.min(bitmap.width, Math.ceil((box.x + box.width) * bitmap.width - 1e-6));
-  const bottom = Math.min(bitmap.height, Math.ceil((box.y + box.height) * bitmap.height - 1e-6));
+function cropBitmap(bitmap: PageBitmap, box: BoundingBox): OcrInput | undefined {
+  const { left, top, right, bottom } = pixelEdges(box, bitmap.width, bitmap.height);
   const width = right - left;
   const height = bottom - top;
   if (width <= 0 || height <= 0) return undefined;
@@ -221,6 +262,50 @@ function cropBitmap(
 }
 
 /**
+ * Expresses a page rectangle relative to another one.
+ *
+ * @param box - Normalized page rectangle
+ * @param frame - Normalized page rectangle used as the new unit square
+ * @returns `box` normalized to `frame`, clipped to it
+ */
+function relativeTo(box: BoundingBox, frame: BoundingBox): BoundingBox {
+  const left = Math.max(0, (box.x - frame.x) / frame.width);
+  const top = Math.max(0, (box.y - frame.y) / frame.height);
+  const right = Math.min(1, (box.x + box.width - frame.x) / frame.width);
+  const bottom = Math.min(1, (box.y + box.height - frame.y) / frame.height);
+  return { x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+}
+
+/**
+ * Maps a rectangle normalized to a frame back onto the page.
+ *
+ * @param box - Rectangle normalized to `frame`
+ * @param frame - Normalized page rectangle
+ * @returns The rectangle normalized to the page
+ */
+function withinFrame(box: BoundingBox, frame: BoundingBox): BoundingBox {
+  return {
+    x: frame.x + box.x * frame.width,
+    y: frame.y + box.y * frame.height,
+    width: box.width * frame.width,
+    height: box.height * frame.height,
+  };
+}
+
+/**
+ * Tells whether two rectangles share some area.
+ *
+ * @param left - First normalized rectangle
+ * @param right - Second normalized rectangle
+ * @returns `true` when their interiors overlap
+ */
+const intersects = (left: BoundingBox, right: BoundingBox): boolean =>
+  left.x < right.x + right.width &&
+  right.x < left.x + left.width &&
+  left.y < right.y + right.height &&
+  right.y < left.y + left.height;
+
+/**
  * Maps a token from crop coordinates to page coordinates.
  *
  * @param token - OCR token normalized to the crop
@@ -228,15 +313,7 @@ function cropBitmap(
  * @returns The token normalized to the page
  */
 function toPageToken(token: TextToken, crop: BoundingBox): TextToken {
-  return {
-    ...token,
-    box: {
-      x: crop.x + token.box.x * crop.width,
-      y: crop.y + token.box.y * crop.height,
-      width: token.box.width * crop.width,
-      height: token.box.height * crop.height,
-    },
-  };
+  return { ...token, box: withinFrame(token.box, crop) };
 }
 
 /**
@@ -487,23 +564,84 @@ export function createScribe(options: CreateScribeOptions): Scribe {
   };
 
   /**
-   * Renders a page once, recognizes each declared region, and merges the result with native text.
+   * Renders one region for OCR, clipped to the region when the adapter supports it.
    *
    * @remarks
-   * Blank regions are not sent to the OCR engine. Page confidence is the mean of the regions'
-   * confidences.
+   * An adapter that ignores `clip` returns the whole page, which is cropped here and kept in
+   * `fullRenders` so the page's other regions at the same density reuse it.
+   *
+   * @param page - Page to render
+   * @param region - Region and render density
+   * @param fullRenders - Whole-page renders by density, reused across the page's regions
+   * @param signal - Optional cancellation signal
+   * @returns The region's pixels and exact page area, or `undefined` when it has no pixels
+   * @throws {@link LimitExceededError} when the render exceeds `maxPixelsPerPage`
+   */
+  const renderRegion = async (
+    page: PdfPage,
+    region: PageRegion,
+    fullRenders: Map<number, PageBitmap>,
+    signal?: AbortSignal,
+  ): Promise<OcrInput | undefined> => {
+    const cached = fullRenders.get(region.dpi);
+    if (cached) return cropBitmap(cached, region.box);
+    const edges = pixelEdges(
+      region.box,
+      Math.ceil((page.width * region.dpi) / 72),
+      Math.ceil((page.height * region.dpi) / 72),
+    );
+    /**
+     * Throws when a pixel count exceeds the configured limit.
+     *
+     * @param pixels - Pixel count of the render
+     * @throws {@link LimitExceededError} when `pixels` is above `maxPixelsPerPage`
+     */
+    const assertPixels = (pixels: number): void => {
+      if (pixels <= limits.maxPixelsPerPage) return;
+      throw new LimitExceededError(
+        `An OCR region of page ${page.number} would render ${pixels} pixels, above the configured limit.`,
+        "pixels",
+        pixels,
+        limits.maxPixelsPerPage,
+      );
+    };
+    assertPixels((edges.right - edges.left) * (edges.bottom - edges.top));
+    const bitmap = await page.render({
+      dpi: region.dpi,
+      grayscale: true,
+      clip: region.box,
+      ...(signal ? { signal } : {}),
+    });
+    abortIfNeeded(signal);
+    if (bitmap.box) {
+      const { box, ...pixels } = bitmap;
+      return { bitmap: pixels, box };
+    }
+    assertPixels(bitmap.width * bitmap.height);
+    fullRenders.set(region.dpi, bitmap);
+    return cropBitmap(bitmap, region.box);
+  };
+
+  /**
+   * Recognizes each declared region of a page and merges the result with native text.
+   *
+   * @remarks
+   * A region overlapping embedded images is read from those images, cropped to the region, at their
+   * native resolution. A region without one, or on a page whose adapter cannot list images, is
+   * rendered on its own at its `renderDpi`. Blank inputs are not sent to the OCR engine. Page
+   * confidence is the mean of the recognized inputs' confidences.
    *
    * @param state - Page state updated in place
-   * @param regions - Normalized regions declared on this page
+   * @param regions - Regions declared on this page
    * @param profile - Profile providing the OCR languages
    * @param signal - Optional cancellation signal
    * @returns A promise that resolves once the page state is updated
    * @throws {@link OcrError} when no OCR engine is configured or recognition fails
-   * @throws {@link LimitExceededError} when the render would exceed `maxPixelsPerPage`
+   * @throws {@link LimitExceededError} when a render would exceed `maxPixelsPerPage`
    */
   const runRegionOcr = async (
     state: MutablePageState,
-    regions: readonly BoundingBox[],
+    regions: readonly PageRegion[],
     profile: DocumentProfile,
     signal?: AbortSignal,
   ): Promise<void> => {
@@ -511,25 +649,48 @@ export function createScribe(options: CreateScribeOptions): Scribe {
     abortIfNeeded(signal);
     const started = performance.now();
     try {
-      const bitmap = await renderForOcr(state.page, signal);
+      const images = state.page.images
+        ? (await state.page.images(signal)).filter(({ bitmap }) => {
+            const pixels = bitmap.width * bitmap.height;
+            return pixels >= MIN_IMAGE_PIXELS && pixels <= limits.maxPixelsPerPage;
+          })
+        : [];
+      const fullRenders = new Map<number, PageBitmap>();
       const tokens: TextToken[] = [];
       const confidences: number[] = [];
-      let recognized = 0;
+      let recognizedRegions = 0;
+      let recognizedImages = 0;
       for (const region of regions) {
-        const crop = cropBitmap(bitmap, region);
-        if (!crop || isBlankBitmap(crop.bitmap, signal)) continue;
-        const result = await ocr.recognize(crop.bitmap, {
-          languages: profile.languages,
-          ...(signal ? { signal } : {}),
-        });
-        recognized += 1;
-        tokens.push(...result.tokens.map((token) => toPageToken(token, crop.box)));
-        if (result.confidence !== undefined) confidences.push(result.confidence);
+        const overlapping = images.filter((image) => intersects(image.box, region.box));
+        const inputs: OcrInput[] = [];
+        for (const image of overlapping) {
+          const crop = cropBitmap(image.bitmap, relativeTo(region.box, image.box));
+          if (crop) inputs.push({ bitmap: crop.bitmap, box: withinFrame(crop.box, image.box) });
+        }
+        if (overlapping.length === 0) {
+          const render = await renderRegion(state.page, region, fullRenders, signal);
+          if (render) inputs.push(render);
+        }
+
+        let recognized = false;
+        for (const input of inputs) {
+          if (isBlankBitmap(input.bitmap, signal)) continue;
+          const result = await ocr.recognize(input.bitmap, {
+            languages: profile.languages,
+            ...(signal ? { signal } : {}),
+          });
+          recognized = true;
+          if (overlapping.length > 0) recognizedImages += 1;
+          tokens.push(...result.tokens.map((token) => toPageToken(token, input.box)));
+          if (result.confidence !== undefined) confidences.push(result.confidence);
+        }
+        if (recognized) recognizedRegions += 1;
       }
       const merged = mergeTokens(state.nativeTokens, tokens);
       state.tokens = merged.tokens;
       if (merged.ocrCount > 0) state.source = state.nativeTokens.length === 0 ? "ocr" : "mixed";
-      state.ocrRegionCount = recognized;
+      state.ocrRegionCount = recognizedRegions;
+      state.ocrImageCount = recognizedImages;
       if (confidences.length > 0) {
         state.ocrConfidence = confidences.reduce((sum, item) => sum + item, 0) / confidences.length;
       }

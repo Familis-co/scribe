@@ -22,7 +22,11 @@ describe("PDFium adapter", () => {
     await expect(
       verifyPdfEngineContract(
         await createPdfiumEngine(),
-        minimalPdf("Contract", "100 400 m 100 700 l S"),
+        minimalPdf("Contract", "100 400 m 100 700 l S\nq 120 0 0 30 100 650 cm /Im1 Do Q", {
+          width: 4,
+          height: 1,
+          data: new Uint8Array([0, 85, 170, 255]),
+        }),
       ),
     ).resolves.toBeUndefined();
   });
@@ -59,6 +63,72 @@ describe("PDFium adapter", () => {
       start: expect.closeTo(400 / 612, 3),
       end: expect.closeTo(500 / 612, 3),
     });
+    await document.close();
+    await engine.close();
+  });
+
+  it("renders only a clipped area, matching the same pixels of a full render", async () => {
+    const engine = await createPdfiumEngine();
+    const document = await engine.open(minimalPdf("Clipped rendering"));
+    const page = await document.getPage(0);
+    const full = await page.render({ dpi: 144, grayscale: true });
+    const clip = { x: 0.1, y: 0.05, width: 0.5, height: 0.1 };
+    const clipped = await page.render({ dpi: 144, grayscale: true, clip });
+
+    // 612 × 792 points at 144 DPI is 1224 × 1584 pixels; the clip widens to whole pixels.
+    const [left, top, right, bottom] = [122, 79, 735, 238];
+    expect(clipped).toMatchObject({
+      width: right - left,
+      height: bottom - top,
+      dpi: 144,
+      box: {
+        x: left / 1224,
+        y: top / 1584,
+        width: (right - left) / 1224,
+        height: (bottom - top) / 1584,
+      },
+    });
+    expect(full).not.toHaveProperty("box");
+    let different = 0;
+    let ink = 0;
+    for (let y = 0; y < clipped.height; y += 1) {
+      for (let x = 0; x < clipped.width; x += 1) {
+        const pixel = clipped.data[y * clipped.width + x]!;
+        if (pixel < 128) ink += 1;
+        if (Math.abs(pixel - full.data[(top + y) * full.width + left + x]!) > 8) different += 1;
+      }
+    }
+    expect(ink).toBeGreaterThan(500);
+    expect(different).toBe(0);
+    await document.close();
+    await engine.close();
+  });
+
+  it("returns upright embedded images at their native resolution", async () => {
+    const engine = await createPdfiumEngine();
+    const image = {
+      width: 160,
+      height: 40,
+      data: Uint8Array.from({ length: 160 * 40 }, (_, index) => index % 160),
+    };
+    const graphics = [
+      "q 120 0 0 30 100 650 cm /Im1 Do Q", // 160 pixels over 120 points: 96 DPI
+      "q 120 0 0 -30 300 400 cm /Im1 Do Q", // flipped: left to the rendered fallback
+    ].join("\n");
+    const document = await engine.open(minimalPdf("Images", graphics, image));
+    const page = await document.getPage(0);
+    const images = await page.images!();
+
+    expect(images).toHaveLength(1);
+    expect(images[0]?.box).toEqual({
+      x: expect.closeTo(100 / 612, 4),
+      y: expect.closeTo(1 - 680 / 792, 4),
+      width: expect.closeTo(120 / 612, 4),
+      height: expect.closeTo(30 / 792, 4),
+    });
+    expect(images[0]?.bitmap).toMatchObject({ width: 160, height: 40, format: "gray8" });
+    expect(images[0]?.bitmap.dpi).toBeCloseTo(96, 3);
+    expect(images[0]?.bitmap.data).toEqual(image.data);
     await document.close();
     await engine.close();
   });

@@ -1,30 +1,50 @@
+/** An 8-bit grayscale image embedded in a fixture as the `/Im1` XObject. */
+export interface FixtureImage {
+  /** Width in pixels. */
+  readonly width: number;
+  /** Height in pixels. */
+  readonly height: number;
+  /** One gray byte per pixel, rows from top to bottom. */
+  readonly data: Uint8Array;
+}
+
 /**
  * Builds a single-page US Letter PDF drawing one line of Helvetica text.
  *
  * @param text - Text to draw, escaped for a PDF literal string
  * @param graphics - Extra content-stream operators drawn after the text, such as rules
+ * @param image - Optional image the graphics can draw with `/Im1 Do`
  * @returns The PDF bytes, including a valid cross-reference table
  */
-export function minimalPdf(text: string, graphics = ""): Uint8Array {
+export function minimalPdf(text: string, graphics = "", image?: FixtureImage): Uint8Array {
   const escaped = text.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
   const content = `BT /F1 24 Tf 72 720 Td (${escaped}) Tj ET${graphics ? `\n${graphics}` : ""}`;
+  const xObjects = image ? " /XObject << /Im1 6 0 R >>" : "";
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >>${xObjects} >> /Contents 5 0 R >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    ...(image
+      ? [
+          `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} ` +
+            `/ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${image.data.length} >>\n` +
+            `stream\n${Buffer.from(image.data).toString("latin1")}\nendstream`,
+        ]
+      : []),
   ];
   let pdf = "%PDF-1.4\n";
   const offsets = [0];
   objects.forEach((object, index) => {
-    offsets.push(Buffer.byteLength(pdf));
+    offsets.push(Buffer.byteLength(pdf, "latin1"));
     pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
   });
-  const xref = Buffer.byteLength(pdf);
+  const xref = Buffer.byteLength(pdf, "latin1");
   pdf += `xref\n0 ${objects.length + 1}\n`;
   pdf += "0000000000 65535 f \n";
   for (const offset of offsets.slice(1)) pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
   pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-  return new TextEncoder().encode(pdf);
+  // Latin-1 keeps every image byte as a single byte.
+  return new Uint8Array(Buffer.from(pdf, "latin1"));
 }
