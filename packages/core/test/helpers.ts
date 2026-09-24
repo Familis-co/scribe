@@ -173,6 +173,7 @@ export class MockPdfEngine implements PdfEngine {
 export class MockOcrEngine implements OcrEngine {
   recognizeCount = 0;
   closeCount = 0;
+  readonly bitmaps: PageBitmap[] = [];
 
   /**
    * Creates a mock OCR engine.
@@ -182,12 +183,14 @@ export class MockOcrEngine implements OcrEngine {
   constructor(private readonly results: readonly OcrResult[]) {}
 
   /**
-   * Returns the next scripted result.
+   * Records the bitmap and returns the next scripted result.
    *
+   * @param bitmap - Bitmap to recognize, appended to {@link MockOcrEngine.bitmaps}
    * @returns The result matching the current call count
    * @throws `Error` when more calls are made than results were scripted
    */
-  async recognize(): Promise<OcrResult> {
+  async recognize(bitmap: PageBitmap): Promise<OcrResult> {
+    this.bitmaps.push(bitmap);
     const result = this.results[this.recognizeCount];
     this.recognizeCount += 1;
     if (!result) throw new Error("Missing mocked OCR result");

@@ -13,7 +13,7 @@ It does not include a PDF or OCR implementation. Install the adapters you need s
 - Scalar, nested, and repeated fields, with ordered fallbacks between strategies.
 - Regex captures and built-in transformations.
 - Standard Schema validation, including asynchronous validators and Zod 4.
-- Selective OCR with per-page diagnostics.
+- Selective OCR of whole pages or declared regions, with per-page diagnostics.
 - Field-level evidence containing source text, coordinates, method, and confidence.
 - `Promise` and `AbortSignal` APIs with discriminated errors.
 - Replaceable PDF and OCR engines.
@@ -275,8 +275,50 @@ await scribe.parse(bytes, profile, { ocr: "auto", signal });
 | `always` | Render every non-blank page and use OCR tokens.                                                                      |
 | `never`  | Use native PDF text only.                                                                                            |
 
-Blank rendered pages are not sent to the OCR engine. OCR tokens replace native tokens for a page;
-the two sources are not merged blindly.
+Blank rendered pages are not sent to the OCR engine. Without declared regions, OCR tokens replace
+native tokens for a page; the two sources are not merged blindly.
+
+### OCR regions
+
+Hybrid documents mix an exact text layer with text that only exists as an image, such as a
+low-resolution header above a real table. OCR'ing the whole page would replace the exact table text
+with OCR output. Declare the image areas instead:
+
+```ts
+defineProfile({
+  id: "schedule",
+  version: "1",
+  languages: ["fra"],
+  ocr: {
+    // Only these regions are ever sent to the OCR engine.
+    regions: [{ page: 1, box: { x: 0.04, y: 0.22, width: 0.92, height: 0.16 } }],
+  },
+  schema,
+  fields,
+});
+```
+
+A region's `page` accepts the same values as a selector's. When a profile declares `ocr.regions`:
+
+| Mode     | Behavior                                                                                                                     |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `auto`   | OCR the regions of pages implicated by missing required fields, or with too little native text. Other pages are never OCR'd. |
+| `always` | OCR every declared region. Pages without a region keep their native text.                                                    |
+| `never`  | Unchanged: native text only.                                                                                                 |
+
+Each page is rendered once, then every region is cropped out of the render and recognized on its
+own. Blank regions are skipped. OCR token boxes are mapped back to page coordinates, then merged
+with the native text layer:
+
+- every native token is kept, because native text is exact;
+- an OCR token is dropped when its center falls inside a native token's box, which happens when a
+  region overlaps native text such as a table header;
+- lines on the merged page are rebuilt from token positions, so native and OCR tokens on the same
+  visual line read as one line.
+
+The page diagnostic reports `source: "mixed"` when OCR tokens were merged into native text (or
+`"ocr"` when the page had no native text), and `ocrRegionCount` with the number of regions
+recognized. `maxPixelsPerPage` still applies to the page render.
 
 ## Result and evidence
 
@@ -292,7 +334,8 @@ interface ExtractionResult<T> {
 Evidence keys are JSON pointers such as `/customer/name`. Each item reports the page, bounding box,
 raw text, `native` or `ocr` method, optional confidence, and transformations applied.
 
-Page diagnostics report native character counts, final token counts, timing, OCR confidence, and
+Page diagnostics report the final text source (`native`, `ocr` or `mixed`), native character
+counts, final token counts, timing, OCR confidence, the number of OCR regions recognized, and
 whether OCR was skipped for a blank page.
 
 ## Limits

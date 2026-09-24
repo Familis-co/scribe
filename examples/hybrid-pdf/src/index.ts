@@ -9,6 +9,11 @@ const profile = defineProfile({
   version: "1",
   languages: ["fra", "eng"],
   schema: z.object({ reference: z.string() }),
+  // The header is an image while the rest of the page has a text layer: only the header band is
+  // ever sent to OCR, and its tokens are merged with the exact native text.
+  ocr: {
+    regions: [{ page: 1, box: { x: 0.04, y: 0.04, width: 0.92, height: 0.2 } }],
+  },
   fields: {
     reference: field.text({
       select: select.relativeToAnchor({
