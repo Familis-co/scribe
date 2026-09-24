@@ -118,7 +118,7 @@ for (const tarball of found) {
     }
 
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    // The tarball already contains built output, so lifecycle scripts such as prepack must not run.
+    // The tarball already contains built output, so no lifecycle script needs to run.
     execFileSync(
       "npm",
       [

@@ -57,8 +57,7 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "prepack": "pnpm build"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@standard-schema/spec": "catalog:"
