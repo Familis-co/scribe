@@ -19,6 +19,9 @@ import { createScheduler, createWorker, OEM, type LoggerMessage } from "tesserac
 /** Tesseract.js scheduler that dispatches jobs across a pool of workers. */
 type Scheduler = ReturnType<typeof createScheduler>;
 
+/** Initialized Tesseract.js worker. */
+type Worker = Awaited<ReturnType<typeof createWorker>>;
+
 /** Configuration for a local Tesseract.js OCR engine. */
 export interface TesseractEngineOptions {
   /**
@@ -28,6 +31,16 @@ export interface TesseractEngineOptions {
    * A local absolute path is recommended in production. No path is selected automatically.
    */
   readonly languageDataPath: string;
+  /**
+   * Whether the language data is gzipped.
+   *
+   * @remarks
+   * When `true`, Tesseract.js reads `<lang>.traineddata.gz`. Set it to `false` for a directory of
+   * plain `<lang>.traineddata` files, the layout tessdata is distributed in.
+   *
+   * @defaultValue `true`
+   */
+  readonly compressed?: boolean;
   /** Writable Tesseract.js cache directory. */
   readonly cachePath?: string;
   /** Custom Tesseract.js worker script location. */
@@ -225,6 +238,10 @@ class TesseractEngine implements OcrEngine {
     if (existing) return existing;
     const created = this.#createPool(normalized);
     this.#pools.set(key, created);
+    // A failed pool is not cached, so the next call for this language set starts new workers.
+    void created.catch(() => {
+      if (this.#pools.get(key) === created) this.#pools.delete(key);
+    });
     return created;
   }
 
@@ -236,25 +253,71 @@ class TesseractEngine implements OcrEngine {
    * @throws `OcrError` when a worker cannot be initialized
    */
   async #createPool(languages: readonly string[]): Promise<WorkerPool> {
-    const scheduler = createScheduler();
+    const starting = Array.from({ length: this.options.concurrency }, () =>
+      this.#startWorker(languages),
+    );
+    let workers: Worker[];
     try {
-      const workers = await Promise.all(
-        Array.from({ length: this.options.concurrency }, () =>
-          createWorker([...languages], OEM.LSTM_ONLY, {
-            langPath: this.options.languageDataPath,
-            ...(this.options.cachePath ? { cachePath: this.options.cachePath } : {}),
-            ...(this.options.workerPath ? { workerPath: this.options.workerPath } : {}),
-            ...(this.options.corePath ? { corePath: this.options.corePath } : {}),
-            ...(this.options.logger ? { logger: this.options.logger } : {}),
-          }),
-        ),
-      );
-      for (const worker of workers) scheduler.addWorker(worker);
-      return { scheduler };
+      workers = await Promise.all(starting);
     } catch (cause) {
-      await scheduler.terminate();
+      // Workers that did start must not outlive the pool. They are terminated without waiting, so
+      // the caller is not held up by siblings still loading their language data.
+      for (const worker of starting) {
+        void worker.then(
+          (started) => started.terminate(),
+          () => undefined,
+        );
+      }
       throw new OcrError(`Could not initialize Tesseract for ${languages.join(", ")}.`, { cause });
     }
+    const scheduler = createScheduler();
+    for (const worker of workers) scheduler.addWorker(worker);
+    return { scheduler };
+  }
+
+  /**
+   * Starts one Tesseract.js worker and settles once it is ready or has failed.
+   *
+   * @remarks
+   * Tesseract.js 7 only rejects `createWorker` when its core fails to load. A language-data or
+   * initialization failure is reported to `errorHandler` while the returned promise stays pending,
+   * and without a handler it is thrown from the worker's message listener, where it crashes the
+   * process. The handler turns that report into a rejection. After start-up, the handler also
+   * receives recognition failures, which already reject their job, so it ignores them.
+   *
+   * Tesseract.js exposes no handle to a worker whose start-up failed, so its thread cannot be
+   * terminated. It stays idle for the life of the process and keeps Node.js from exiting on its own.
+   * Corrupt language data is still out of reach: Tesseract.js answers the failed
+   * `initialize` job twice, and the second answer throws inside its own message listener.
+   *
+   * @param languages - Normalized language identifiers
+   * @returns The initialized worker
+   * @throws `Error` carrying the Tesseract.js report when the worker cannot be initialized
+   */
+  #startWorker(languages: readonly string[]): Promise<Worker> {
+    return new Promise<Worker>((resolve, reject) => {
+      let settled = false;
+      const fail = (cause: unknown): void => {
+        if (settled) return;
+        settled = true;
+        // Tesseract.js reports worker failures as `error.toString()`, so the prefix is dropped.
+        reject(cause instanceof Error ? cause : new Error(String(cause).replace(/^Error: /u, "")));
+      };
+      void createWorker([...languages], OEM.LSTM_ONLY, {
+        langPath: this.options.languageDataPath,
+        gzip: this.options.compressed ?? true,
+        errorHandler: fail,
+        ...(this.options.cachePath ? { cachePath: this.options.cachePath } : {}),
+        ...(this.options.workerPath ? { workerPath: this.options.workerPath } : {}),
+        ...(this.options.corePath ? { corePath: this.options.corePath } : {}),
+        ...(this.options.logger ? { logger: this.options.logger } : {}),
+      }).then((worker) => {
+        if (settled) return worker.terminate();
+        settled = true;
+        resolve(worker);
+        return undefined;
+      }, fail);
+    });
   }
 }
 

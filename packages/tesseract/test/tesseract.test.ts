@@ -14,7 +14,7 @@ vi.mock("tesseract.js", () => ({
   OEM: { LSTM_ONLY: 1 },
 }));
 
-import { AbortError } from "@familis/scribe";
+import { AbortError, OcrError } from "@familis/scribe";
 import sharp from "sharp";
 import { createTesseractEngine } from "../src/index.js";
 
@@ -92,6 +92,90 @@ describe("Tesseract adapter", () => {
         { languages: ["eng"], signal: controller.signal },
       ),
     ).rejects.toBeInstanceOf(AbortError);
+    await engine.close();
+  });
+
+  it("reads gzipped language data unless compressed is false", async () => {
+    const bitmap = { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" } as const;
+    const gzipped = await createTesseractEngine({ languageDataPath: "/models" });
+    await gzipped.recognize(bitmap, { languages: ["fra"] });
+    const plain = await createTesseractEngine({ languageDataPath: "/models", compressed: false });
+    await plain.recognize(bitmap, { languages: ["fra"] });
+
+    expect(mocks.createWorker.mock.calls[0]?.[2]).toMatchObject({ gzip: true });
+    expect(mocks.createWorker.mock.calls[1]?.[2]).toMatchObject({ gzip: false });
+    await gzipped.close();
+    await plain.close();
+  });
+
+  it("rejects with OcrError when language data fails to load, then retries", async () => {
+    // Tesseract.js reports a missing language file to errorHandler and never settles createWorker.
+    mocks.createWorker.mockImplementationOnce(
+      (_languages: string[], _oem: number, options: { errorHandler: (report: string) => void }) => {
+        queueMicrotask(() =>
+          options.errorHandler(
+            "Error: ENOENT: no such file or directory, open '/models/fra.traineddata.gz'",
+          ),
+        );
+        return new Promise(() => {});
+      },
+    );
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    const bitmap = { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" } as const;
+
+    const failure = engine.recognize(bitmap, { languages: ["fra"] });
+    await expect(failure).rejects.toBeInstanceOf(OcrError);
+    await expect(failure).rejects.toMatchObject({
+      cause: expect.objectContaining({ message: expect.stringContaining("ENOENT") }),
+    });
+    expect(mocks.addJob).not.toHaveBeenCalled();
+
+    const retried = await engine.recognize(bitmap, { languages: ["fra"] });
+    expect(mocks.createWorker).toHaveBeenCalledTimes(2);
+    expect(retried.tokens[0]?.text).toBe("Hello");
+    await engine.close();
+  });
+
+  it("terminates the workers that started when a sibling fails", async () => {
+    const started = { terminate: vi.fn().mockResolvedValue(undefined) };
+    mocks.createWorker
+      .mockResolvedValueOnce(started)
+      .mockRejectedValueOnce(new Error("core failed to load"));
+    const engine = await createTesseractEngine({ languageDataPath: "/models", concurrency: 2 });
+
+    await expect(
+      engine.recognize(
+        { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" },
+        { languages: ["eng"] },
+      ),
+    ).rejects.toBeInstanceOf(OcrError);
+    await vi.waitFor(() => expect(started.terminate).toHaveBeenCalledTimes(1));
+    expect(mocks.createScheduler).not.toHaveBeenCalled();
+    await engine.close();
+  });
+
+  it("ignores errors reported after a worker has started", async () => {
+    let report: ((error: string) => void) | undefined;
+    mocks.createWorker.mockImplementationOnce(
+      async (
+        _languages: string[],
+        _oem: number,
+        options: { errorHandler: (error: string) => void },
+      ) => {
+        report = options.errorHandler;
+        return { terminate: vi.fn() };
+      },
+    );
+    mocks.addJob.mockImplementationOnce(async () => {
+      report?.("Error: recognition failed");
+      throw new Error("recognition failed");
+    });
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    const bitmap = { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" } as const;
+
+    await expect(engine.recognize(bitmap, { languages: ["eng"] })).rejects.toBeInstanceOf(OcrError);
+    await engine.recognize(bitmap, { languages: ["eng"] });
+    expect(mocks.createWorker).toHaveBeenCalledTimes(1);
     await engine.close();
   });
 
