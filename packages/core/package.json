@@ -1,6 +1,6 @@
 {
   "name": "@familis/scribe",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Engine-independent structured PDF extraction pipeline",
   "homepage": "https://github.com/Familis-co/scribe/tree/main/packages/core#readme",
   "bugs": {
