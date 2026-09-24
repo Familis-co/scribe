@@ -188,6 +188,14 @@ export interface ParseOptions {
   readonly signal?: AbortSignal;
 }
 
+/** Label matched by a fuzzy anchor selector. */
+export interface AnchorEvidence {
+  /** Space-joined text of the tokens that matched the anchor label. */
+  readonly text: string;
+  /** Similarity between the declared label and {@link AnchorEvidence.text}, between `0` and `1`. */
+  readonly score: number;
+}
+
 /** Traceable source material used to produce one output field. */
 export interface FieldEvidence {
   /** One-based source page number. */
@@ -207,6 +215,8 @@ export interface FieldEvidence {
   readonly transformations: readonly string[];
   /** Zero-based index of the `field.firstOf` alternative that produced the value. */
   readonly alternative?: number;
+  /** Anchor label matched on this page, when the selector matched it with `fuzzy`. */
+  readonly anchor?: AnchorEvidence;
 }
 
 /** Non-fatal information or warning produced during extraction. */

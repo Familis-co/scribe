@@ -1,6 +1,9 @@
+import { bestWindow, editDistance, fuzzyKey } from "./fuzzy.js";
+import { visualLines } from "./lines.js";
 import type {
   AfterAnchorSelector,
   AnchorSelector,
+  BelowAnchorSelector,
   DocumentProfile,
   FieldDefinition,
   FieldTree,
@@ -11,7 +14,17 @@ import type {
 } from "./profile.js";
 import { isFieldDefinition, isFirstOfDefinition, isTableDefinition } from "./profile.js";
 import { layoutTable } from "./table.js";
-import type { BoundingBox, Diagnostic, FieldEvidence, JsonPointer, TextToken } from "./types.js";
+import type {
+  AnchorEvidence,
+  BoundingBox,
+  Diagnostic,
+  FieldEvidence,
+  JsonPointer,
+  TextToken,
+} from "./types.js";
+
+/** Longest run of tokens compared with a fuzzy anchor label. */
+const FUZZY_ANCHOR_TOKENS = 5;
 
 /** Page tokens consumed by {@link extractProfile}. */
 export interface ExtractPage {
@@ -49,6 +62,8 @@ interface FieldResult {
 interface PageSelection {
   readonly page: number;
   readonly tokens: readonly TextToken[];
+  /** Label matched by a fuzzy anchor on this page. */
+  readonly anchor?: AnchorEvidence;
 }
 
 /** A token's position in text assembled by {@link layoutText}. */
@@ -65,6 +80,8 @@ interface TokenSpan {
 interface TextLayout {
   readonly text: string;
   readonly spans: readonly TokenSpan[];
+  /** Fuzzy anchor labels by page number. */
+  readonly anchors: ReadonlyMap<number, AnchorEvidence>;
 }
 
 /** A captured raw value and the `[start, end)` range it was read from in the assembled text. */
@@ -230,12 +247,40 @@ function findText(
   return match ? { start: match.index, end: match.index + match[0].length } : undefined;
 }
 
+/** Anchor selectors, which all locate a text label before selecting tokens. */
+type AnyAnchorSelector = AnchorSelector | AfterAnchorSelector | BelowAnchorSelector;
+
 /** One line-level occurrence of an anchor. */
 interface AnchorMatch {
   /** Union of the tokens covered by the match. */
   readonly box: BoundingBox;
-  /** Tokens of the same line to the right of the anchor's last token, left to right. */
-  readonly following: readonly TextToken[];
+  /** Every token of the anchor's line, left to right. */
+  readonly line: readonly TextToken[];
+  /** Index in `line` of the anchor's first token. */
+  readonly start: number;
+  /** Index in `line` just past the anchor's last token. */
+  readonly end: number;
+  /** Matched label and score, for fuzzy matches only. */
+  readonly label?: AnchorEvidence;
+}
+
+/**
+ * Returns the fuzzy comparison key of a label when fuzzy matching applies to it.
+ *
+ * @param search - Literal or regular-expression label
+ * @param fuzzy - Minimum similarity, or `undefined` for exact matching
+ * @param caseSensitive - Whether letter case is preserved
+ * @returns The label's key, or `undefined` for exact matching: without `fuzzy`, for a pattern, and
+ * for a literal without any letter or digit
+ */
+function fuzzyLabel(
+  search: string | RegExp,
+  fuzzy: number | undefined,
+  caseSensitive: boolean,
+): string | undefined {
+  if (fuzzy === undefined || typeof search !== "string") return undefined;
+  const key = fuzzyKey(search, caseSensitive);
+  return key.length > 0 ? key : undefined;
 }
 
 /**
@@ -243,18 +288,47 @@ interface AnchorMatch {
  *
  * @remarks
  * Each line is joined with single spaces so literal and regex anchors can span several tokens. Only
- * the first match per line is reported.
+ * the first match per line is reported, in line order.
+ *
+ * With `fuzzy`, a literal anchor is compared with every run of 1 to 5 tokens of each line, and the
+ * best run at or above the threshold is the line's match, extended over any punctuation-only tokens
+ * that directly follow it. Matches are then ranked by score, ties going to the leftmost match, then
+ * to the top one.
  *
  * @param tokens - Tokens of a single page
  * @param selector - Anchor text and matching options
- * @returns Each match with the tokens that follow it on its line, in reading order
+ * @returns Each match with its line, in occurrence order
  */
 function findAnchors(
   tokens: readonly TextToken[],
-  selector: AnchorSelector | AfterAnchorSelector,
+  selector: AnyAnchorSelector,
 ): readonly AnchorMatch[] {
   const anchors: AnchorMatch[] = [];
+  const key = fuzzyLabel(selector.text, selector.fuzzy, selector.caseSensitive);
   for (const line of groupLines(tokens)) {
+    if (key !== undefined) {
+      const window = bestWindow(
+        line,
+        key,
+        selector.fuzzy!,
+        selector.caseSensitive,
+        FUZZY_ANCHOR_TOKENS,
+      );
+      if (!window) continue;
+      // Punctuation after the label, such as a detached `:`, belongs to it rather than to the value.
+      let end = window.end;
+      while (end < line.length && fuzzyKey(line[end]!.text, selector.caseSensitive) === "")
+        end += 1;
+      const matched = line.slice(window.start, end);
+      anchors.push({
+        box: unionBoxes(matched.map((token) => token.box)),
+        line,
+        start: window.start,
+        end,
+        label: { text: matched.map((token) => token.text).join(" "), score: window.score },
+      });
+      continue;
+    }
     const { text, spans } = lineText(line);
     const found = findText(text, selector.text, selector.caseSensitive);
     if (!found) continue;
@@ -262,10 +336,18 @@ function findAnchors(
     if (matched.length === 0) continue;
     anchors.push({
       box: unionBoxes(matched.map((span) => span.token.box)),
-      following: line.slice(line.indexOf(matched.at(-1)!.token) + 1),
+      line,
+      start: line.indexOf(matched[0]!.token),
+      end: line.indexOf(matched.at(-1)!.token) + 1,
     });
   }
-  return anchors;
+  if (key === undefined) return anchors;
+  return anchors.toSorted(
+    (left, right) =>
+      right.label!.score - left.label!.score ||
+      left.box.x - right.box.x ||
+      left.box.y - right.box.y,
+  );
 }
 
 /**
@@ -274,13 +356,20 @@ function findAnchors(
  * @param tokens - Tokens following an anchor, left to right
  * @param stopAt - Literal or regular-expression stop text, which may span several tokens
  * @param caseSensitive - Whether literal matching preserves case
+ * @param fuzzy - Minimum similarity for a fuzzy literal match, or `undefined` for an exact one
  * @returns The tokens that end before the stop match, or every token when it does not match
  */
 function tokensBefore(
   tokens: readonly TextToken[],
   stopAt: string | RegExp,
   caseSensitive: boolean,
+  fuzzy: number | undefined,
 ): readonly TextToken[] {
+  const key = fuzzyLabel(stopAt, fuzzy, caseSensitive);
+  if (key !== undefined) {
+    const window = bestWindow(tokens, key, fuzzy!, caseSensitive, FUZZY_ANCHOR_TOKENS);
+    return window ? tokens.slice(0, window.start) : tokens;
+  }
   const { text, spans } = lineText(tokens);
   const found = findText(text, stopAt, caseSensitive);
   if (!found) return tokens;
@@ -288,22 +377,69 @@ function tokensBefore(
 }
 
 /**
+ * Selects the lines printed below an anchor, within the anchor's column.
+ *
+ * @param tokens - Tokens of a single page
+ * @param anchor - Matched anchor
+ * @param selector - Line count and distance options
+ * @returns The tokens of the selected lines, empty when no line is close enough
+ */
+function linesBelow(
+  tokens: readonly TextToken[],
+  anchor: AnchorMatch,
+  selector: BelowAnchorSelector,
+): readonly TextToken[] {
+  // Values are read as left-aligned with their label once another label sits beside it.
+  const left = anchor.start > 0 ? anchor.box.x : 0;
+  const right = anchor.line[anchor.end]?.box.x ?? 1;
+  const bottom = anchor.box.y + anchor.box.height;
+  const maxDistance = selector.maxDistance ?? anchor.box.height * 2;
+  const column = tokens.filter((token) => {
+    const center = token.box.x + token.box.width / 2;
+    return center >= left && center <= right && token.box.y + token.box.height / 2 > bottom;
+  });
+
+  const selected: TextToken[] = [];
+  let edge = bottom;
+  for (const line of visualLines(column).slice(0, selector.maxLines)) {
+    const top = Math.min(...line.map((token) => token.box.y));
+    if (top - edge > maxDistance) break;
+    selected.push(...line);
+    edge = Math.max(...line.map((token) => token.box.y + token.box.height));
+  }
+  return selected;
+}
+
+/**
  * Selects the tokens of one page matched by a selector.
  *
- * @param selector - Region, anchor-relative, or line-scoped anchor selector
+ * @param selector - Region or anchor selector
  * @param tokens - Tokens of a single page
- * @returns The selected tokens in any order, empty when the anchor is not found
+ * @returns The selected tokens in any order, empty when the anchor is not found, and the label a
+ * fuzzy anchor matched
  */
-function selectOnPage(selector: TextSelector, tokens: readonly TextToken[]): readonly TextToken[] {
+function selectOnPage(
+  selector: TextSelector,
+  tokens: readonly TextToken[],
+): { readonly tokens: readonly TextToken[]; readonly anchor?: AnchorEvidence } {
   if (selector.kind === "region") {
-    return tokens.filter((token) => tokenCenterInBox(token, selector.box));
+    return { tokens: tokens.filter((token) => tokenCenterInBox(token, selector.box)) };
   }
   const anchor = findAnchors(tokens, selector)[selector.occurrence];
-  if (!anchor) return [];
+  if (!anchor) return { tokens: [] };
+  const label = anchor.label ? { anchor: anchor.label } : {};
   if (selector.kind === "afterAnchor") {
-    return selector.stopAt === undefined
-      ? anchor.following
-      : tokensBefore(anchor.following, selector.stopAt, selector.caseSensitive);
+    const following = anchor.line.slice(anchor.end);
+    return {
+      tokens:
+        selector.stopAt === undefined
+          ? following
+          : tokensBefore(following, selector.stopAt, selector.caseSensitive, selector.fuzzy),
+      ...label,
+    };
+  }
+  if (selector.kind === "belowAnchor") {
+    return { tokens: linesBelow(tokens, anchor, selector), ...label };
   }
   const box = normalizeBox({
     x: anchor.box.x + selector.offset.x,
@@ -311,13 +447,13 @@ function selectOnPage(selector: TextSelector, tokens: readonly TextToken[]): rea
     width: selector.offset.width,
     height: selector.offset.height,
   });
-  return tokens.filter((token) => tokenCenterInBox(token, box));
+  return { tokens: tokens.filter((token) => tokenCenterInBox(token, box)), ...label };
 }
 
 /**
  * Collects the tokens selected by a selector across eligible pages.
  *
- * @param selector - Region, anchor-relative, or line-scoped anchor selector
+ * @param selector - Region or anchor selector
  * @param pages - Pages available for extraction
  * @returns Selected tokens grouped by page in reading order, and the pages that contributed at least
  * one token
@@ -332,8 +468,14 @@ function tokensForSelector(
   for (const pageNumber of candidates) {
     const page = pages.find((item) => item.number === pageNumber);
     if (!page) continue;
-    const tokens = selectOnPage(selector, page.tokens);
-    if (tokens.length > 0) selections.push({ page: pageNumber, tokens: sortedTokens(tokens) });
+    const { tokens, anchor } = selectOnPage(selector, page.tokens);
+    if (tokens.length > 0) {
+      selections.push({
+        page: pageNumber,
+        tokens: sortedTokens(tokens),
+        ...(anchor ? { anchor } : {}),
+      });
+    }
   }
 
   return { selections, pages: selections.map((selection) => selection.page) };
@@ -343,12 +485,14 @@ function tokensForSelector(
  * Joins selected tokens into text, with spaces between words and newlines between lines and pages.
  *
  * @param selections - Selected tokens grouped by page
- * @returns The reconstructed text and the character range of every token in it
+ * @returns The reconstructed text, the character range of every token in it, and fuzzy anchor labels
  */
 function layoutText(selections: readonly PageSelection[]): TextLayout {
   const spans: TokenSpan[] = [];
+  const anchors = new Map<number, AnchorEvidence>();
   let text = "";
   for (const selection of selections) {
+    if (selection.anchor) anchors.set(selection.page, selection.anchor);
     for (const line of groupLines(selection.tokens)) {
       if (text.length > 0) text += "\n";
       line.forEach((token, index) => {
@@ -359,7 +503,7 @@ function layoutText(selections: readonly PageSelection[]): TextLayout {
       });
     }
   }
-  return { text, spans };
+  return { text, spans, anchors };
 }
 
 /**
@@ -457,6 +601,7 @@ function readValue(
     const spans = backing.filter((span) => span.page === page);
     const tokens = spans.map((span) => span.token);
     const confidence = lowestConfidence(tokens);
+    const anchor = layout.anchors.get(page);
     return {
       page,
       box: unionBoxes(tokens.map((token) => token.box)),
@@ -464,6 +609,7 @@ function readValue(
       method: tokens.some((token) => token.source === "ocr") ? "ocr" : "native",
       ...(confidence === undefined ? {} : { confidence }),
       transformations,
+      ...(anchor ? { anchor } : {}),
     };
   });
   const confidence = lowestConfidence(backing.map((span) => span.token));
@@ -515,33 +661,6 @@ function comparableText(
   let comparable = value.normalize("NFKD");
   if (transform.ignoreDiacritics) comparable = comparable.replace(/\p{M}/gu, "");
   return transform.ignoreCase ? comparable.toLocaleLowerCase() : comparable;
-}
-
-/**
- * Computes the Levenshtein distance between two strings.
- *
- * @param left - First string
- * @param right - Second string
- * @returns Minimum number of single-character insertions, deletions, or substitutions
- */
-function editDistance(left: string, right: string): number {
-  if (left === right) return 0;
-  if (left.length === 0) return right.length;
-  if (right.length === 0) return left.length;
-
-  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
-    const current = [leftIndex];
-    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
-      current[rightIndex] = Math.min(
-        current[rightIndex - 1]! + 1,
-        previous[rightIndex]! + 1,
-        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
-      );
-    }
-    previous = current;
-  }
-  return previous[right.length]!;
 }
 
 /**
@@ -839,6 +958,7 @@ export async function extractProfile(
     const selected = tokensForSelector(tree.selector, pages);
     const layouts = selected.selections.map((selection) => ({
       page: selection.page,
+      anchor: selection.anchor,
       rows: layoutTable(selection.tokens, tree.columns, tree.rowKey),
     }));
     if (layouts.every((layout) => layout.rows === undefined)) {
@@ -850,11 +970,11 @@ export async function extractProfile(
       );
     }
 
-    const sourceRows = layouts.flatMap(({ page, rows }) =>
-      (rows ?? []).map((cells) => ({ page, cells })),
+    const sourceRows = layouts.flatMap(({ page, anchor, rows }) =>
+      (rows ?? []).map((cells) => ({ page, anchor, cells })),
     );
     const rows: Record<string, unknown>[] = [];
-    for (const [sourceIndex, { page, cells }] of sourceRows.entries()) {
+    for (const [sourceIndex, { page, anchor, cells }] of sourceRows.entries()) {
       const missing = tree.columns.filter(
         (column) => column.required && (cells.get(column.key)?.length ?? 0) === 0,
       );
@@ -886,6 +1006,7 @@ export async function extractProfile(
           method: tokens.some((token) => token.source === "ocr") ? "ocr" : "native",
           ...(confidence === undefined ? {} : { confidence }),
           transformations: transformNames(column.transforms),
+          ...(anchor ? { anchor } : {}),
         };
         try {
           row[column.key] = await applyTransforms(text, column.transforms);
