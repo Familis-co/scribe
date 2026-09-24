@@ -71,15 +71,17 @@ try {
 
 ## Options
 
-| Option             | Required | Description                                                                 |
-| ------------------ | -------- | --------------------------------------------------------------------------- |
-| `languageDataPath` | Yes      | Local path or explicitly configured Tesseract.js language-data location.    |
-| `compressed`       | No       | Whether language files are gzipped (`.traineddata.gz`). Defaults to `true`. |
-| `cachePath`        | No       | Writable Tesseract.js cache directory.                                      |
-| `workerPath`       | No       | Custom Tesseract.js worker script location.                                 |
-| `corePath`         | No       | Custom Tesseract.js core/WASM location.                                     |
-| `concurrency`      | No       | Number of OCR workers per language set. Defaults to `1`.                    |
-| `logger`           | No       | Receives Tesseract.js progress messages.                                    |
+| Option             | Required | Description                                                                        |
+| ------------------ | -------- | ---------------------------------------------------------------------------------- |
+| `languageDataPath` | Yes      | Local path or explicitly configured Tesseract.js language-data location.           |
+| `compressed`       | No       | Whether language files are gzipped (`.traineddata.gz`). Defaults to `true`.        |
+| `cachePath`        | No       | Writable Tesseract.js cache directory.                                             |
+| `workerPath`       | No       | Custom Tesseract.js worker script location.                                        |
+| `corePath`         | No       | Custom Tesseract.js core/WASM location.                                            |
+| `concurrency`      | No       | Number of OCR workers per language set. Defaults to `1`.                           |
+| `logger`           | No       | Receives Tesseract.js progress messages.                                           |
+| `preprocess`       | No       | `{ threshold, sharpen }` image adjustments before recognition. All off by default. |
+| `pageSegMode`      | No       | Tesseract page segmentation mode (`PSM`). Defaults to Tesseract's `PSM.AUTO`.      |
 
 ```ts
 const ocr = await createTesseractEngine({
@@ -125,6 +127,37 @@ and `1`, with confidence values between `0` and `1`.
 
 The standard PDFium adapter supplies the requested render density. The core pipeline renders OCR
 pages in grayscale at 300 DPI and skips visually blank pages before invoking this adapter.
+
+## Preprocessing and page segmentation
+
+By default the bitmap reaches Tesseract as rendered, and Tesseract picks its own page layout. Two
+options change that:
+
+```ts
+import { createTesseractEngine, PSM } from "@familis/scribe-tesseract";
+
+const ocr = await createTesseractEngine({
+  languageDataPath: "/opt/tessdata",
+  preprocess: {
+    threshold: 160, // binarize: gray levels >= 160 become white, the rest black
+    sharpen: false,
+  },
+  pageSegMode: PSM.SINGLE_BLOCK,
+});
+```
+
+- `preprocess.threshold` binarizes the image before PNG encoding. It helps with low-resolution
+  bitmap text, such as a 96 DPI header embedded in a PDF, where gray anti-aliasing blurs digits
+  together. It must be an integer from `0` to `255`; `null` or omitted leaves the image untouched.
+  Too high a cutoff thins or breaks light strokes, too low a cutoff merges them, so tune it against
+  your own documents.
+- `preprocess.sharpen` applies a mild sharpen. It runs before thresholding when both are set.
+- `pageSegMode` tells Tesseract how the image is laid out. `PSM.AUTO` suits full pages;
+  `PSM.SINGLE_BLOCK` or `PSM.SINGLE_LINE` suit a cropped region holding one block or one line of
+  text. `PSM` is re-exported, so there is no need to import Tesseract.js directly.
+
+These settings apply to every page the engine recognizes. Measure them on representative documents
+before enabling them: they help degraded bitmap text and can hurt clean scans.
 
 ## Languages
 
