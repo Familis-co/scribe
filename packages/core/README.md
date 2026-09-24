@@ -508,7 +508,8 @@ fuzzy anchor located the value, `anchor` holds the label it matched and its scor
 
 Page diagnostics report the final text source (`native`, `ocr` or `mixed`), native character
 counts, final token counts, timing, OCR confidence, the number of OCR regions and embedded images
-recognized, and whether OCR was skipped for a blank page.
+recognized, whether OCR was skipped for a blank page, and `droppedTokenCount`, the number of
+recognized words the OCR engine discarded, summed across regions, when the engine reports it.
 
 ## Limits
 

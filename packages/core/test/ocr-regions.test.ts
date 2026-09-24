@@ -91,6 +91,7 @@ describe("declared OCR regions", () => {
       tokenCount: 5,
       nativeCharacterCount: 13,
     });
+    expect(result.pages[0]).not.toHaveProperty("droppedTokenCount");
     expect(result.diagnostics).toContainEqual(
       expect.objectContaining({ code: "OCR_FALLBACK_USED" }),
     );
@@ -174,6 +175,31 @@ describe("declared OCR regions", () => {
     expect(result.pages[0]).toMatchObject({ source: "ocr", ocrRegionCount: 1 });
   });
 
+  it("sums the words the engine dropped across regions", async () => {
+    const pdf = new MockPdfEngine([[]], [gradient]);
+    const ocr = new MockOcrEngine([
+      {
+        tokens: [
+          token("Reference", box(0, 0.1, 0.3, 0.1), 0, "ocr"),
+          token("XYZ", box(0.4, 0.1, 0.3, 0.1), 0, "ocr"),
+        ],
+        droppedTokenCount: 1,
+      },
+      { tokens: [] },
+      { tokens: [], droppedTokenCount: 2 },
+    ]);
+    const footer: OcrRegion = { page: 1, box: { x: 0, y: 0.5, width: 1, height: 0.1 } };
+    const margin: OcrRegion = { page: 1, box: { x: 0, y: 0.7, width: 0.2, height: 0.1 } };
+
+    const result = await createScribe({ pdf, ocr }).parse(
+      new Uint8Array([1]),
+      profileWith([header, footer, margin]),
+    );
+
+    expect(ocr.recognizeCount).toBe(3);
+    expect(result.pages[0]).toMatchObject({ ocrRegionCount: 3, droppedTokenCount: 3 });
+  });
+
   it("does not send blank regions to the OCR engine", async () => {
     const pdf = new MockPdfEngine([[]], [gradient]);
     const ocr = new MockOcrEngine([]);
@@ -215,6 +241,27 @@ describe("declared OCR regions", () => {
     expect(ocr.bitmaps[0]).toMatchObject({ width: 10, height: 10 });
     expect(result.pages[0]).toMatchObject({ source: "ocr", tokenCount: 2 });
     expect(result.pages[0]).not.toHaveProperty("ocrRegionCount");
+    expect(result.pages[0]).not.toHaveProperty("droppedTokenCount");
+  });
+
+  it("reports the words the engine dropped on a whole-page OCR", async () => {
+    const pdf = new MockPdfEngine([[]]);
+    const ocr = new MockOcrEngine([
+      {
+        tokens: [
+          token("Reference", box(0.1, 0.1), 0, "ocr"),
+          token("ABC-42", box(0.3, 0.1), 0, "ocr"),
+        ],
+        confidence: 0.9,
+        droppedTokenCount: 4,
+      },
+    ]);
+
+    const result = await createScribe({ pdf, ocr }).parse(new Uint8Array([1]), profileWith(), {
+      ocr: "always",
+    });
+
+    expect(result.pages[0]).toMatchObject({ source: "ocr", tokenCount: 2, droppedTokenCount: 4 });
   });
 
   it("validates declared regions", () => {

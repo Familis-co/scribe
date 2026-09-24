@@ -201,6 +201,14 @@ export interface OcrResult {
   readonly tokens: readonly TextToken[];
   /** Optional page-level confidence between `0` and `1`. */
   readonly confidence?: number;
+  /**
+   * Number of recognized words the engine discarded before returning tokens.
+   *
+   * @remarks
+   * Reported by engines that filter their output, such as by word confidence, so the filtering stays
+   * observable in page diagnostics. Engines that never discard words may omit it.
+   */
+  readonly droppedTokenCount?: number;
 }
 
 /** Replaceable adapter contract for bitmap OCR. */
@@ -322,6 +330,11 @@ export interface PageDiagnostic {
   readonly ocrRegionCount?: number;
   /** Number of embedded images recognized at their native resolution, when the profile declares regions. */
   readonly ocrImageCount?: number;
+  /**
+   * Number of recognized words the OCR engine discarded on the page, summed across regions, when the
+   * engine reports it.
+   */
+  readonly droppedTokenCount?: number;
 }
 
 /**
