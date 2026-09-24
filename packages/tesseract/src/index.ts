@@ -45,6 +45,29 @@ export interface TesseractPreprocessOptions {
   readonly sharpen?: boolean;
 }
 
+/** Resampling of low-resolution page bitmaps before they are sent to Tesseract. */
+export interface TesseractUpscaleOptions {
+  /**
+   * Density that bitmaps rendered below it are enlarged to, in dots per inch.
+   *
+   * @remarks
+   * A finite number above `0`. Tesseract reads best at about 300 DPI of glyph detail.
+   *
+   * @defaultValue `300`
+   */
+  readonly targetDpi?: number;
+  /**
+   * Largest enlargement factor applied to a bitmap.
+   *
+   * @remarks
+   * A finite number of at least `1`. A bitmap too small to reach `targetDpi` within it is enlarged
+   * by this factor and sent at the density it reaches.
+   *
+   * @defaultValue `4`
+   */
+  readonly maxFactor?: number;
+}
+
 /** Configuration for a local Tesseract.js OCR engine. */
 export interface TesseractEngineOptions {
   /**
@@ -81,6 +104,16 @@ export interface TesseractEngineOptions {
   readonly concurrency?: number;
   /** Receives Tesseract.js progress and status messages. */
   readonly logger?: (message: LoggerMessage) => void;
+  /**
+   * Enlarges bitmaps whose `dpi` is below the target density with a Lanczos kernel, before
+   * `preprocess` runs.
+   *
+   * @remarks
+   * A bitmap without `dpi` is never resized. `false` disables upscaling.
+   *
+   * @defaultValue `{ targetDpi: 300, maxFactor: 4 }`
+   */
+  readonly upscale?: TesseractUpscaleOptions | false;
   /** Image adjustments applied before recognition. All are off by default. */
   readonly preprocess?: TesseractPreprocessOptions;
   /**
@@ -115,6 +148,14 @@ export interface TesseractEngineOptions {
 interface WordFilter {
   readonly minWordConfidence: number;
   readonly dropPunctuationOnly: boolean;
+}
+
+/** PNG input for Tesseract with the pixel size and density it was encoded at. */
+interface PreparedImage {
+  readonly png: Buffer;
+  readonly width: number;
+  readonly height: number;
+  readonly dpi: number;
 }
 
 /** Initialized workers dedicated to one normalized language set. */
@@ -214,8 +255,8 @@ async function assertLanguageData(
  * Tesseract line.
  *
  * @param blocks - Tesseract layout blocks, or `null` when no layout was produced
- * @param width - Source bitmap width in pixels
- * @param height - Source bitmap height in pixels
+ * @param width - Width in pixels of the image Tesseract read
+ * @param height - Height in pixels of the image Tesseract read
  * @param filter - Word filters to apply
  * @returns Word tokens in reading order with one line index per Tesseract line, and the number of
  * words dropped
@@ -268,26 +309,38 @@ function normalizedTokens(
  *
  * @remarks
  * Sharp runs its operations in a fixed order, so sharpening always happens before thresholding,
- * whichever way they are chained.
+ * whichever way they are chained. Resizing comes before both, so the adjustments act on the
+ * upscaled pixels.
  *
  * @param bitmap - Grayscale or RGBA page render
  * @param preprocess - Adjustments applied before PNG encoding
- * @returns PNG bytes carrying the bitmap density, 300 DPI when unknown
+ * @param upscale - Upscaling applied before `preprocess`, or `false` to keep the bitmap size
+ * @returns PNG bytes with their pixel size and density: the bitmap density times the upscale
+ * factor, or 300 DPI when the bitmap density is unknown
  */
 async function imageBuffer(
   bitmap: PageBitmap,
   preprocess: TesseractPreprocessOptions = {},
-): Promise<Buffer> {
+  upscale: TesseractUpscaleOptions | false = {},
+): Promise<PreparedImage> {
   const channels = bitmap.format === "gray8" ? 1 : 4;
   const image = sharp(bitmap.data, {
     raw: { width: bitmap.width, height: bitmap.height, channels },
   });
+  let factor = 1;
+  if (upscale !== false && bitmap.dpi !== undefined) {
+    const targetDpi = upscale.targetDpi ?? 300;
+    if (bitmap.dpi < targetDpi) factor = Math.min(upscale.maxFactor ?? 4, targetDpi / bitmap.dpi);
+  }
+  const width = Math.round(bitmap.width * factor);
+  const height = Math.round(bitmap.height * factor);
+  // `fill` keeps rounding from cropping a row or column to preserve the aspect ratio.
+  if (factor > 1) image.resize(width, height, { kernel: "lanczos3", fit: "fill" });
   if (preprocess.sharpen) image.sharpen();
   if (preprocess.threshold != null) image.threshold(preprocess.threshold);
-  return image
-    .png()
-    .withMetadata({ density: bitmap.dpi ?? 300 })
-    .toBuffer();
+  const dpi = bitmap.dpi === undefined ? 300 : bitmap.dpi * factor;
+  const png = await image.png().withMetadata({ density: dpi }).toBuffer();
+  return { png, width, height, dpi };
 }
 
 /** OCR engine that lazily creates one worker pool per language set. */
@@ -319,27 +372,26 @@ class TesseractEngine implements OcrEngine {
     if (options.languages.length === 0)
       throw new OcrError("At least one OCR language is required.");
     const pool = await this.#pool(options.languages);
-    const image = await imageBuffer(bitmap, this.options.preprocess);
+    const image = await imageBuffer(bitmap, this.options.preprocess, this.options.upscale);
     abortIfNeeded(options.signal);
+    // Tesseract.js sets every key it does not own as a Tesseract variable for this job only, and
+    // restores the previous values once the job completes.
+    const parameters: Partial<Tesseract.RecognizeOptions & Tesseract.WorkerParams> = {
+      rotateAuto: false,
+      user_defined_dpi: String(Math.round(image.dpi)),
+      preserve_interword_spaces: "1",
+    };
     try {
       const result = await withAbort(
-        pool.scheduler.addJob(
-          "recognize",
-          image,
-          { rotateAuto: false },
-          { text: true, blocks: true },
-        ),
+        pool.scheduler.addJob("recognize", image.png, parameters, { text: true, blocks: true }),
         options.signal,
       );
-      const { tokens, dropped } = normalizedTokens(
-        result.data.blocks,
-        bitmap.width,
-        bitmap.height,
-        {
-          minWordConfidence: this.options.minWordConfidence ?? 0,
-          dropPunctuationOnly: this.options.dropPunctuationOnly ?? false,
-        },
-      );
+      // Tesseract's boxes are in the pixels it read, so dividing by the upscaled size normalizes
+      // them to the original bitmap.
+      const { tokens, dropped } = normalizedTokens(result.data.blocks, image.width, image.height, {
+        minWordConfidence: this.options.minWordConfidence ?? 0,
+        dropPunctuationOnly: this.options.dropPunctuationOnly ?? false,
+      });
       return {
         tokens,
         confidence: Math.min(1, Math.max(0, result.data.confidence / 100)),
@@ -504,7 +556,8 @@ class TesseractEngine implements OcrEngine {
  *
  * @throws `TypeError` when `languageDataPath` is empty
  * @throws `RangeError` when concurrency is not a positive integer, `preprocess.threshold` is not an
- * integer from 0 to 255, or `minWordConfidence` is not a number from 0 to 1
+ * integer from 0 to 255, `minWordConfidence` is not a number from 0 to 1, `upscale.targetDpi` is
+ * not a finite number above 0, or `upscale.maxFactor` is not a finite number of at least 1
  *
  * @remarks
  * The returned engine accepts rendered bitmaps, not PDF files. Call {@link OcrEngine.close} during
@@ -540,6 +593,14 @@ export async function createTesseractEngine(options: TesseractEngineOptions): Pr
     (!Number.isFinite(minWordConfidence) || minWordConfidence < 0 || minWordConfidence > 1)
   ) {
     throw new RangeError("minWordConfidence must be a number from 0 to 1.");
+  }
+  const targetDpi = options.upscale ? options.upscale.targetDpi : undefined;
+  if (targetDpi !== undefined && (!Number.isFinite(targetDpi) || targetDpi <= 0)) {
+    throw new RangeError("upscale.targetDpi must be a finite number above 0.");
+  }
+  const maxFactor = options.upscale ? options.upscale.maxFactor : undefined;
+  if (maxFactor !== undefined && (!Number.isFinite(maxFactor) || maxFactor < 1)) {
+    throw new RangeError("upscale.maxFactor must be a finite number of at least 1.");
   }
   return new TesseractEngine({ ...options, concurrency });
 }

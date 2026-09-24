@@ -47,6 +47,41 @@ async function sentPixels(call = 0): Promise<Uint8Array> {
 }
 
 /**
+ * Reads the size and density of the PNG the adapter sent to Tesseract.
+ *
+ * @param call - Index of the `addJob` call to inspect
+ * @returns The PNG width, height and density
+ */
+async function sentImage(call = 0): Promise<{
+  width: number;
+  height: number;
+  density: number | undefined;
+}> {
+  const png: unknown = mocks.addJob.mock.calls[call]?.[1];
+  if (!Buffer.isBuffer(png)) throw new Error(`addJob call ${call} carried no PNG buffer.`);
+  const { width, height, density } = await sharp(png).metadata();
+  return { width, height, density };
+}
+
+/**
+ * Builds a 32 × 16 grayscale bitmap with a diagonal pattern at the given density.
+ *
+ * @param dpi - Bitmap density, or `undefined` to leave it unknown
+ * @returns The page bitmap
+ */
+function lowResolution(dpi?: number) {
+  return {
+    data: Uint8Array.from({ length: 32 * 16 }, (_, index) =>
+      (index % 32) + Math.floor(index / 32) < 24 ? 30 : 220,
+    ),
+    width: 32,
+    height: 16,
+    format: "gray8",
+    ...(dpi === undefined ? {} : { dpi }),
+  } as const;
+}
+
+/**
  * Builds a mocked Tesseract.js result holding one line per entry, each word 10 pixels wide.
  *
  * @param lines - Words of each line as `[text, confidence]`, confidence from 0 to 100
@@ -489,6 +524,129 @@ describe("Tesseract adapter", () => {
       minWordConfidence: 1,
     });
     await engine.close();
+  });
+
+  it("upscales a 96 DPI bitmap to 300 DPI with a Lanczos kernel", async () => {
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    const bitmap = lowResolution(96);
+    await engine.recognize(bitmap, { languages: ["eng"] });
+
+    // 300 / 96 = 3.125
+    expect(await sentImage()).toEqual({ width: 100, height: 50, density: 300 });
+    const lanczos = await sharp(bitmap.data, { raw: { width: 32, height: 16, channels: 1 } })
+      .resize(100, 50, { kernel: "lanczos3", fit: "fill" })
+      .extractChannel(0)
+      .raw()
+      .toBuffer();
+    expect(await sentPixels()).toEqual(new Uint8Array(lanczos));
+    await engine.close();
+  });
+
+  it("leaves 300 DPI bitmaps and bitmaps without a density untouched", async () => {
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    await engine.recognize(lowResolution(300), { languages: ["eng"] });
+    await engine.recognize(lowResolution(), { languages: ["eng"] });
+
+    expect(await sentImage(0)).toEqual({ width: 32, height: 16, density: 300 });
+    expect(await sentPixels(0)).toEqual(lowResolution().data);
+    expect(await sentImage(1)).toEqual({ width: 32, height: 16, density: 300 });
+    expect(await sentPixels(1)).toEqual(lowResolution().data);
+    await engine.close();
+  });
+
+  it("caps the upscale factor at maxFactor", async () => {
+    const capped = await createTesseractEngine({ languageDataPath: "/models" });
+    await capped.recognize(lowResolution(50), { languages: ["eng"] });
+    const custom = await createTesseractEngine({
+      languageDataPath: "/models",
+      upscale: { targetDpi: 200, maxFactor: 1.5 },
+    });
+    await custom.recognize(lowResolution(100), { languages: ["eng"] });
+
+    expect(await sentImage(0)).toEqual({ width: 128, height: 64, density: 200 });
+    expect(await sentImage(1)).toEqual({ width: 48, height: 24, density: 150 });
+    await capped.close();
+    await custom.close();
+  });
+
+  it("keeps low-resolution bitmaps at their size when upscale is false", async () => {
+    const engine = await createTesseractEngine({ languageDataPath: "/models", upscale: false });
+    await engine.recognize(lowResolution(96), { languages: ["eng"] });
+
+    expect(await sentImage()).toEqual({ width: 32, height: 16, density: 96 });
+    expect(mocks.addJob.mock.calls[0]?.[2]).toMatchObject({ user_defined_dpi: "96" });
+    await engine.close();
+  });
+
+  it("upscales before thresholding", async () => {
+    const engine = await createTesseractEngine({
+      languageDataPath: "/models",
+      preprocess: { threshold: 128 },
+    });
+    await engine.recognize(lowResolution(96), { languages: ["eng"] });
+
+    // Thresholding first would leave Lanczos gray levels along the diagonal edge.
+    expect(await sentImage()).toMatchObject({ width: 100, height: 50 });
+    expect(new Set(await sentPixels())).toEqual(new Set([0, 255]));
+    await engine.close();
+  });
+
+  it("normalizes token boxes to the original bitmap after upscaling", async () => {
+    // Tesseract reads the 100 × 50 upscaled image, so its boxes are in that pixel space.
+    mocks.addJob.mockResolvedValue({
+      data: {
+        confidence: 90,
+        blocks: [
+          {
+            paragraphs: [
+              {
+                lines: [
+                  {
+                    words: [
+                      { text: "Total", confidence: 90, bbox: { x0: 25, y0: 10, x1: 75, y1: 35 } },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    const result = await engine.recognize(lowResolution(96), { languages: ["eng"] });
+
+    expect(result.tokens[0]?.box).toEqual({ x: 0.25, y: 0.2, width: 0.5, height: 0.5 });
+    await engine.close();
+  });
+
+  it("forwards the image density and interword spacing to Tesseract", async () => {
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    await engine.recognize(lowResolution(96), { languages: ["eng"] });
+    await engine.recognize(lowResolution(), { languages: ["eng"] });
+
+    expect(mocks.addJob).toHaveBeenNthCalledWith(
+      1,
+      "recognize",
+      expect.any(Buffer),
+      { rotateAuto: false, user_defined_dpi: "300", preserve_interword_spaces: "1" },
+      { text: true, blocks: true },
+    );
+    expect(mocks.addJob.mock.calls[1]?.[2]).toMatchObject({ user_defined_dpi: "300" });
+    await engine.close();
+  });
+
+  it("rejects an invalid upscale target or factor", async () => {
+    for (const targetDpi of [0, -96, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        createTesseractEngine({ languageDataPath: "/models", upscale: { targetDpi } }),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
+    for (const maxFactor of [0, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        createTesseractEngine({ languageDataPath: "/models", upscale: { maxFactor } }),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
   });
 
   it("requires an explicit language data path", async () => {
