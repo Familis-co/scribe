@@ -14,13 +14,34 @@ import {
   type TextToken,
 } from "@familis/scribe";
 import sharp from "sharp";
-import { createScheduler, createWorker, OEM, type LoggerMessage } from "tesseract.js";
+import { createScheduler, createWorker, OEM, type LoggerMessage, type PSM } from "tesseract.js";
+
+export { PSM } from "tesseract.js";
 
 /** Tesseract.js scheduler that dispatches jobs across a pool of workers. */
 type Scheduler = ReturnType<typeof createScheduler>;
 
 /** Initialized Tesseract.js worker. */
 type Worker = Awaited<ReturnType<typeof createWorker>>;
+
+/** Image adjustments applied to each page bitmap before it is sent to Tesseract. */
+export interface TesseractPreprocessOptions {
+  /**
+   * Binarizes the image at this gray level: pixels at or above it become white, the rest black.
+   *
+   * @remarks
+   * An integer from `0` to `255`. `null` or omitted leaves the gray levels untouched.
+   *
+   * @defaultValue `null`
+   */
+  readonly threshold?: number | null;
+  /**
+   * Applies a mild sharpen before any thresholding.
+   *
+   * @defaultValue `false`
+   */
+  readonly sharpen?: boolean;
+}
 
 /** Configuration for a local Tesseract.js OCR engine. */
 export interface TesseractEngineOptions {
@@ -51,6 +72,15 @@ export interface TesseractEngineOptions {
   readonly concurrency?: number;
   /** Receives Tesseract.js progress and status messages. */
   readonly logger?: (message: LoggerMessage) => void;
+  /** Image adjustments applied before recognition. All are off by default. */
+  readonly preprocess?: TesseractPreprocessOptions;
+  /**
+   * Tesseract page segmentation mode, set on every worker.
+   *
+   * @remarks
+   * Omitted, the parameter is not set and Tesseract keeps its own default, `PSM.AUTO`.
+   */
+  readonly pageSegMode?: PSM;
 }
 
 /** Initialized workers dedicated to one normalized language set. */
@@ -148,14 +178,25 @@ function normalizedTokens(
 /**
  * Encodes a raw bitmap as a PNG that Tesseract.js can read.
  *
+ * @remarks
+ * Sharp runs its operations in a fixed order, so sharpening always happens before thresholding,
+ * whichever way they are chained.
+ *
  * @param bitmap - Grayscale or RGBA page render
+ * @param preprocess - Adjustments applied before PNG encoding
  * @returns PNG bytes carrying the bitmap density, 300 DPI when unknown
  */
-async function imageBuffer(bitmap: PageBitmap): Promise<Buffer> {
+async function imageBuffer(
+  bitmap: PageBitmap,
+  preprocess: TesseractPreprocessOptions = {},
+): Promise<Buffer> {
   const channels = bitmap.format === "gray8" ? 1 : 4;
-  return sharp(bitmap.data, {
+  const image = sharp(bitmap.data, {
     raw: { width: bitmap.width, height: bitmap.height, channels },
-  })
+  });
+  if (preprocess.sharpen) image.sharpen();
+  if (preprocess.threshold != null) image.threshold(preprocess.threshold);
+  return image
     .png()
     .withMetadata({ density: bitmap.dpi ?? 300 })
     .toBuffer();
@@ -188,7 +229,7 @@ class TesseractEngine implements OcrEngine {
     if (options.languages.length === 0)
       throw new OcrError("At least one OCR language is required.");
     const pool = await this.#pool(options.languages);
-    const image = await imageBuffer(bitmap);
+    const image = await imageBuffer(bitmap, this.options.preprocess);
     abortIfNeeded(options.signal);
     try {
       const result = await withAbort(
@@ -253,8 +294,8 @@ class TesseractEngine implements OcrEngine {
    * @throws `OcrError` when a worker cannot be initialized
    */
   async #createPool(languages: readonly string[]): Promise<WorkerPool> {
-    const starting = Array.from({ length: this.options.concurrency }, () =>
-      this.#startWorker(languages),
+    const starting = Array.from({ length: this.options.concurrency }, async () =>
+      this.#configure(await this.#startWorker(languages)),
     );
     let workers: Worker[];
     try {
@@ -273,6 +314,24 @@ class TesseractEngine implements OcrEngine {
     const scheduler = createScheduler();
     for (const worker of workers) scheduler.addWorker(worker);
     return { scheduler };
+  }
+
+  /**
+   * Applies the configured recognition parameters to a started worker.
+   *
+   * @param worker - Initialized worker
+   * @returns The same worker, ready for jobs
+   * @throws `Error` when Tesseract.js rejects the parameters, after terminating the worker
+   */
+  async #configure(worker: Worker): Promise<Worker> {
+    if (this.options.pageSegMode === undefined) return worker;
+    try {
+      await worker.setParameters({ tessedit_pageseg_mode: this.options.pageSegMode });
+      return worker;
+    } catch (cause) {
+      await worker.terminate();
+      throw cause;
+    }
   }
 
   /**
@@ -328,7 +387,8 @@ class TesseractEngine implements OcrEngine {
  * @returns An OCR engine that initializes worker pools lazily per language set
  *
  * @throws `TypeError` when `languageDataPath` is empty
- * @throws `RangeError` when concurrency is not a positive integer
+ * @throws `RangeError` when concurrency is not a positive integer, or `preprocess.threshold` is not
+ * an integer from 0 to 255
  *
  * @remarks
  * The returned engine accepts rendered bitmaps, not PDF files. Call {@link OcrEngine.close} during
@@ -354,6 +414,10 @@ export async function createTesseractEngine(options: TesseractEngineOptions): Pr
   const concurrency = options.concurrency ?? 1;
   if (!Number.isInteger(concurrency) || concurrency < 1) {
     throw new RangeError("Tesseract concurrency must be a positive integer.");
+  }
+  const threshold = options.preprocess?.threshold;
+  if (threshold != null && (!Number.isInteger(threshold) || threshold < 0 || threshold > 255)) {
+    throw new RangeError("preprocess.threshold must be an integer from 0 to 255.");
   }
   return new TesseractEngine({ ...options, concurrency });
 }

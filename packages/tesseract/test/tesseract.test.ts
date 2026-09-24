@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   addWorker: vi.fn(),
   createScheduler: vi.fn(),
   createWorker: vi.fn(),
+  setParameters: vi.fn(),
   terminate: vi.fn(),
 }));
 
@@ -12,11 +13,32 @@ vi.mock("tesseract.js", () => ({
   createScheduler: mocks.createScheduler,
   createWorker: mocks.createWorker,
   OEM: { LSTM_ONLY: 1 },
+  PSM: { AUTO: "3", SINGLE_BLOCK: "6" },
 }));
 
 import { AbortError, OcrError } from "@familis/scribe";
 import sharp from "sharp";
-import { createTesseractEngine } from "../src/index.js";
+import { createTesseractEngine, PSM } from "../src/index.js";
+
+/** A 256 × 1 grayscale ramp whose pixel at index `n` has gray level `n`. */
+const gradient = {
+  data: Uint8Array.from({ length: 256 }, (_, index) => index),
+  width: 256,
+  height: 1,
+  format: "gray8",
+} as const;
+
+/**
+ * Decodes the PNG the adapter sent to Tesseract back into one gray level per pixel.
+ *
+ * @param call - Index of the `addJob` call to inspect
+ * @returns The gray level of every pixel, left to right
+ */
+async function sentPixels(call = 0): Promise<Uint8Array> {
+  const png: unknown = mocks.addJob.mock.calls[call]?.[1];
+  if (!Buffer.isBuffer(png)) throw new Error(`addJob call ${call} carried no PNG buffer.`);
+  return new Uint8Array(await sharp(png).extractChannel(0).raw().toBuffer());
+}
 
 describe("Tesseract adapter", () => {
   beforeEach(() => {
@@ -26,7 +48,11 @@ describe("Tesseract adapter", () => {
       addWorker: mocks.addWorker,
       terminate: mocks.terminate,
     });
-    mocks.createWorker.mockResolvedValue({ terminate: vi.fn() });
+    mocks.createWorker.mockResolvedValue({
+      setParameters: mocks.setParameters,
+      terminate: vi.fn(),
+    });
+    mocks.setParameters.mockResolvedValue({ jobId: "parameters", data: {} });
     mocks.terminate.mockResolvedValue(undefined);
     mocks.addJob.mockResolvedValue({
       data: {
@@ -177,6 +203,82 @@ describe("Tesseract adapter", () => {
     await engine.recognize(bitmap, { languages: ["eng"] });
     expect(mocks.createWorker).toHaveBeenCalledTimes(1);
     await engine.close();
+  });
+
+  it("sends the page bitmap untouched by default", async () => {
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    await engine.recognize(gradient, { languages: ["eng"] });
+
+    expect(await sentPixels()).toEqual(gradient.data);
+    await engine.close();
+  });
+
+  it("binarizes the page bitmap at the configured threshold", async () => {
+    const engine = await createTesseractEngine({
+      languageDataPath: "/models",
+      preprocess: { threshold: 160 },
+    });
+    await engine.recognize(gradient, { languages: ["eng"] });
+
+    const pixels = await sentPixels();
+    expect(pixels).toHaveLength(256);
+    expect(pixels.every((level) => level === 0 || level === 255)).toBe(true);
+    expect(pixels.indexOf(255)).toBe(160);
+    expect(pixels.subarray(160).every((level) => level === 255)).toBe(true);
+    await engine.close();
+  });
+
+  it("sharpens the page bitmap before thresholding it", async () => {
+    // A soft vertical edge: sharpening overshoots on both sides of it.
+    const edge = {
+      data: Uint8Array.from({ length: 16 * 16 }, (_, index) => (index % 16 < 8 ? 60 : 200)),
+      width: 16,
+      height: 16,
+      format: "gray8",
+    } as const;
+    const sharpened = await createTesseractEngine({
+      languageDataPath: "/models",
+      preprocess: { sharpen: true, threshold: null },
+    });
+    await sharpened.recognize(edge, { languages: ["eng"] });
+    const both = await createTesseractEngine({
+      languageDataPath: "/models",
+      preprocess: { sharpen: true, threshold: 128 },
+    });
+    await both.recognize(edge, { languages: ["eng"] });
+
+    const levels = new Set(await sentPixels(0));
+    expect(levels.size).toBeGreaterThan(2);
+    expect([...levels].some((level) => level < 60 || level > 200)).toBe(true);
+    expect(new Set(await sentPixels(1))).toEqual(new Set([0, 255]));
+    await sharpened.close();
+    await both.close();
+  });
+
+  it("rejects a threshold outside 0 to 255", async () => {
+    for (const threshold of [-1, 256, 160.5, Number.NaN]) {
+      await expect(
+        createTesseractEngine({ languageDataPath: "/models", preprocess: { threshold } }),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
+  });
+
+  it("sets the page segmentation mode only when configured", async () => {
+    const bitmap = { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" } as const;
+    const automatic = await createTesseractEngine({ languageDataPath: "/models" });
+    await automatic.recognize(bitmap, { languages: ["eng"] });
+    expect(mocks.setParameters).not.toHaveBeenCalled();
+
+    const block = await createTesseractEngine({
+      languageDataPath: "/models",
+      pageSegMode: PSM.SINGLE_BLOCK,
+      concurrency: 2,
+    });
+    await block.recognize(bitmap, { languages: ["eng"] });
+    expect(mocks.setParameters).toHaveBeenCalledTimes(2);
+    expect(mocks.setParameters).toHaveBeenCalledWith({ tessedit_pageseg_mode: "6" });
+    await automatic.close();
+    await block.close();
   });
 
   it("requires an explicit language data path", async () => {
