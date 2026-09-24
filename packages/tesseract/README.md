@@ -39,8 +39,10 @@ const ocr = await createTesseractEngine({
 });
 ```
 
-A language file that is missing or cannot be read rejects `recognize` with `OcrError`, whose `cause`
-names the file Tesseract.js tried to open.
+When `languageDataPath` is a local directory, the adapter checks that every requested language file
+exists and is readable before it starts a worker. A missing file rejects `recognize` with `OcrError`,
+whose message names the file and the configured path. Remote locations are left to Tesseract.js: a
+file it cannot fetch also rejects with `OcrError`, whose `cause` carries the Tesseract.js report.
 
 The adapter never selects a remote language-data source or automatically detects a language. Every
 document profile must declare its languages.
@@ -200,11 +202,14 @@ await ocr.close();
 An abort rejects the caller immediately. Tesseract.js work already executing inside a worker may
 finish internally before that worker accepts another job.
 
-A pool that fails to initialize is not kept: the next call for the same language set starts new
-workers, so language data added after the failure is picked up without a restart. Tesseract.js
-offers no way to terminate a worker whose language data failed to load, though, so each failed
-start leaves its worker threads idle and keeps Node.js from exiting on its own. Treat the
-`OcrError` as a configuration problem to fix rather than a call to retry in a loop.
+A missing local language file is checked again on every call, so data deployed after the failure is
+picked up without a restart, and no worker is started until it is there.
+
+Other initialization failures, such as corrupt or unreachable language data, happen inside a worker.
+Tesseract.js offers no way to terminate a worker whose language data failed to load, so its thread
+stays idle and keeps Node.js from exiting on its own. To keep that to one failed start per language
+set, the engine remembers the failure: later calls for the same languages reject with the same
+`OcrError` without starting new workers. Fix the configuration and create a new engine to retry.
 
 ## Container deployment
 

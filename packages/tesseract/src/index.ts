@@ -13,6 +13,8 @@ import {
   type PageBitmap,
   type TextToken,
 } from "@familis/scribe";
+import { access, constants } from "node:fs/promises";
+import { join } from "node:path";
 import sharp from "sharp";
 import { createScheduler, createWorker, OEM, type LoggerMessage, type PSM } from "tesseract.js";
 
@@ -135,6 +137,44 @@ async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<
 }
 
 /**
+ * Rejects before any worker starts when a language file is missing from a local directory.
+ *
+ * @remarks
+ * A worker whose language data fails to load cannot be terminated, so catching the common failure
+ * here keeps it from leaking a thread. Remote locations are left to Tesseract.js, which treats any
+ * `scheme://` or protocol-relative `//` path as a URL.
+ *
+ * @param languageDataPath - Configured language-data location
+ * @param languages - Normalized language identifiers
+ * @param compressed - Whether Tesseract.js reads `.traineddata.gz` rather than `.traineddata`
+ * @throws `OcrError` naming each missing file and the configured path, with the first file-system
+ * error as `cause`
+ */
+async function assertLanguageData(
+  languageDataPath: string,
+  languages: readonly string[],
+  compressed: boolean,
+): Promise<void> {
+  if (/^(?:[a-z][\w+.-]*:)?\/\//iu.test(languageDataPath)) return;
+  const extension = compressed ? ".traineddata.gz" : ".traineddata";
+  const checks = await Promise.allSettled(
+    languages.map((language) =>
+      access(join(languageDataPath, `${language}${extension}`), constants.R_OK),
+    ),
+  );
+  const missing = languages.flatMap((language, index) =>
+    checks[index]?.status === "rejected" ? [`${language}${extension}`] : [],
+  );
+  if (missing.length === 0) return;
+  const cause = checks.find((check) => check.status === "rejected")?.reason;
+  throw new OcrError(
+    `Tesseract language data ${missing.join(", ")} is missing or unreadable in languageDataPath ` +
+      `${languageDataPath}.`,
+    { cause },
+  );
+}
+
+/**
  * Converts Tesseract word boxes into normalized OCR tokens.
  *
  * @param blocks - Tesseract layout blocks, or `null` when no layout was produced
@@ -220,8 +260,10 @@ class TesseractEngine implements OcrEngine {
   /**
    * {@inheritDoc @familis/scribe#OcrEngine.recognize}
    *
-   * @throws `OcrError` when no language is given, initialization fails, or recognition fails
+   * @throws `OcrError` when no language is given, a language file is missing, initialization
+   * fails, or recognition fails
    * @throws `AbortError` when the signal fires before recognition completes
+   * @throws `DisposedError` when the engine is closed while the language data is being checked
    */
   async recognize(bitmap: PageBitmap, options: OcrRecognizeOptions): Promise<OcrResult> {
     if (this.#closed) throw new DisposedError();
@@ -267,23 +309,35 @@ class TesseractEngine implements OcrEngine {
   /**
    * Returns the worker pool for a language set, creating it on first use.
    *
+   * @remarks
+   * A missing language file rejects before any worker starts and is checked again on the next call,
+   * so data added later is picked up. A pool whose workers failed to start stays cached as a
+   * rejection: every failed start leaks a thread, so it happens at most once per language set.
+   *
    * @param languages - Requested languages, deduplicated and sorted to form the cache key
    * @returns The shared pool for this language set
+   * @throws `OcrError` when a language file is missing or a worker cannot be initialized
+   * @throws `DisposedError` when the engine is closed while the language data is being checked
    */
-  #pool(languages: readonly string[]): Promise<WorkerPool> {
+  async #pool(languages: readonly string[]): Promise<WorkerPool> {
     const normalized = [
       ...new Set(languages.map((language) => language.trim()).filter(Boolean)),
     ].toSorted();
     const key = normalized.join("+");
     const existing = this.#pools.get(key);
     if (existing) return existing;
-    const created = this.#createPool(normalized);
-    this.#pools.set(key, created);
-    // A failed pool is not cached, so the next call for this language set starts new workers.
-    void created.catch(() => {
-      if (this.#pools.get(key) === created) this.#pools.delete(key);
-    });
-    return created;
+    await assertLanguageData(
+      this.options.languageDataPath,
+      normalized,
+      this.options.compressed ?? true,
+    );
+    // The check yields, so a concurrent call may have created the pool, or close() may have run.
+    const created = this.#pools.get(key);
+    if (created) return created;
+    if (this.#closed) throw new DisposedError();
+    const pool = this.#createPool(normalized);
+    this.#pools.set(key, pool);
+    return pool;
   }
 
   /**
@@ -346,8 +400,10 @@ class TesseractEngine implements OcrEngine {
    *
    * Tesseract.js exposes no handle to a worker whose start-up failed, so its thread cannot be
    * terminated. It stays idle for the life of the process and keeps Node.js from exiting on its own.
-   * Corrupt language data is still out of reach: Tesseract.js answers the failed
-   * `initialize` job twice, and the second answer throws inside its own message listener.
+   * `#pool` keeps that leak to one start per language set: it checks local language files before
+   * any worker starts and remembers a pool that failed. Corrupt language data is still out of reach:
+   * Tesseract.js answers the failed `initialize` job twice, and the second answer throws inside its
+   * own message listener.
    *
    * @param languages - Normalized language identifiers
    * @returns The initialized worker
