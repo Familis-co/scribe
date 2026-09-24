@@ -20,6 +20,7 @@ import type {
   Diagnostic,
   FieldEvidence,
   JsonPointer,
+  PageRules,
   TextToken,
 } from "./types.js";
 
@@ -32,6 +33,8 @@ export interface ExtractPage {
   readonly number: number;
   /** Final positioned tokens for the page, native or OCR. */
   readonly tokens: readonly TextToken[];
+  /** Rules drawn on the page, when a table uses them and the PDF adapter reads them. */
+  readonly rules?: PageRules;
 }
 
 /** Unvalidated outcome of applying a profile to a set of pages. */
@@ -946,7 +949,8 @@ export async function extractProfile(
    *
    * @remarks
    * Each selected page is laid out on its own, so a header repeated on every page starts a new set
-   * of rows. A cell whose transform throws becomes `null`; a row missing a required cell is dropped.
+   * of rows. A cell whose transform throws becomes `null`; a row missing a required cell is dropped,
+   * unless the whole column's header is missing, which nulls its cells with one diagnostic per page.
    * Evidence and cell diagnostics use the row's index in the output, after `filter`.
    *
    * @param tree - Table definition
@@ -956,12 +960,28 @@ export async function extractProfile(
   const resolveTable = async (tree: TableDefinition, path: readonly string[]): Promise<unknown> => {
     const pointer = pointerFor(path);
     const selected = tokensForSelector(tree.selector, pages);
-    const layouts = selected.selections.map((selection) => ({
-      page: selection.page,
-      anchor: selection.anchor,
-      rows: layoutTable(selection.tokens, tree.columns, tree.rowKey),
-    }));
-    if (layouts.every((layout) => layout.rows === undefined)) {
+    const minColumns =
+      tree.minColumns === "all"
+        ? tree.columns.length
+        : tree.minColumns === "half"
+          ? Math.ceil(tree.columns.length / 2)
+          : tree.minColumns;
+    const layouts = selected.selections.map((selection) => {
+      const rules = tree.useRules
+        ? pages.find((page) => page.number === selection.page)?.rules?.vertical
+        : undefined;
+      return {
+        page: selection.page,
+        anchor: selection.anchor,
+        layout: layoutTable(selection.tokens, tree.columns, tree.rowKey, {
+          minColumns,
+          ...(tree.fuzzy === undefined ? {} : { fuzzy: tree.fuzzy }),
+          ...(tree.rowTolerance === undefined ? {} : { rowTolerance: tree.rowTolerance }),
+          ...(rules ? { rules } : {}),
+        }),
+      };
+    });
+    if (layouts.every(({ layout }) => layout === undefined)) {
       return notFound(
         tree,
         pointer,
@@ -970,13 +990,42 @@ export async function extractProfile(
       );
     }
 
-    const sourceRows = layouts.flatMap(({ page, anchor, rows }) =>
-      (rows ?? []).map((cells) => ({ page, anchor, cells })),
+    for (const { page, layout } of layouts) {
+      if (layout && layout.missingColumns.length > 0) {
+        diagnostics.push({
+          level: "warning",
+          code: "TABLE_COLUMN_NOT_FOUND",
+          message: `No header was found for column ${layout.missingColumns.join(", ")} of ${pointer} on page ${page}; its cells are null.`,
+          page,
+          path: pointer,
+        });
+      }
+      if (layout && layout.droppedLines.length > 0) {
+        diagnostics.push({
+          level: "info",
+          code: "TABLE_LINES_DROPPED",
+          message: `Lines too far from every row of ${pointer} were dropped: ${layout.droppedLines.map((line) => JSON.stringify(line)).join(", ")}.`,
+          page,
+          path: pointer,
+        });
+      }
+    }
+
+    const sourceRows = layouts.flatMap(({ page, anchor, layout }) =>
+      (layout?.rows ?? []).map((cells) => ({
+        page,
+        anchor,
+        cells,
+        missingColumns: layout?.missingColumns ?? [],
+      })),
     );
     const rows: Record<string, unknown>[] = [];
-    for (const [sourceIndex, { page, anchor, cells }] of sourceRows.entries()) {
+    for (const [sourceIndex, { page, anchor, cells, missingColumns }] of sourceRows.entries()) {
       const missing = tree.columns.filter(
-        (column) => column.required && (cells.get(column.key)?.length ?? 0) === 0,
+        (column) =>
+          column.required &&
+          !missingColumns.includes(column.key) &&
+          (cells.get(column.key)?.length ?? 0) === 0,
       );
       if (missing.length > 0) {
         diagnostics.push({
@@ -1103,4 +1152,16 @@ export async function extractProfile(
     missingRequired,
     implicatedPages: [...implicatedPages],
   };
+}
+
+/**
+ * Tells whether any table in a field tree reads the page's rules.
+ *
+ * @param tree - Field tree of a profile
+ * @returns `true` when a {@link TableDefinition} has `useRules` set
+ */
+export function usesRules(tree: FieldTree): boolean {
+  if (isTableDefinition(tree)) return tree.useRules;
+  if (isFieldDefinition(tree) || isFirstOfDefinition(tree)) return false;
+  return Object.values(tree).some(usesRules);
 }

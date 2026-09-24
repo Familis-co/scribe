@@ -74,8 +74,24 @@ interface TextToken {
 }
 ```
 
-This package does not reconstruct complex tables. Profiles should use token coordinates, anchors,
-and regex captures to extract structured values.
+This package does not reconstruct tables on its own. Profiles use token coordinates, anchors,
+regex captures and `field.table` to extract structured values.
+
+## Rules
+
+`page.rules()` lists the straight lines drawn on the page, which `field.table` uses as column
+boundaries:
+
+```ts
+const { vertical, horizontal } = await page.rules();
+// vertical: [{ position: 0.12, start: 0.3, end: 0.8 }, …] (x, then top and bottom)
+```
+
+- Every straight, axis-aligned segment of a stroked path is a rule, so lines, stroked rectangles
+  and grids drawn as one path all contribute their sides.
+- A filled path is a rule when its bounds are a thin, long box, at most 3 points thick. Wider
+  filled shapes, such as cell shading, are ignored.
+- Segments shorter than 6 points are ignored, and so are paths nested in form XObjects.
 
 Text rendered as an image is not returned by native extraction. Configure an OCR adapter for those
 regions or pages.

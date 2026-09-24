@@ -12,6 +12,8 @@ import {
   PdfEngineError,
   type BoundingBox,
   type PageBitmap,
+  type PageRule,
+  type PageRules,
   type PdfDocument,
   type PdfEngine,
   type PdfOpenOptions,
@@ -24,6 +26,18 @@ import {
 const PDFIUM_ERROR_PASSWORD = 4;
 /** PDFium bitmaps use four bytes per pixel in BGRA order. */
 const BYTES_PER_PIXEL = 4;
+/** `FPDF_PAGEOBJ_PATH`, the page object type of vector paths. */
+const PAGE_OBJECT_PATH = 2;
+/** `FPDF_SEGMENT_LINETO`, a straight path segment. */
+const SEGMENT_LINE = 0;
+/** `FPDF_SEGMENT_MOVETO`, the start of a subpath. */
+const SEGMENT_MOVE = 2;
+/** Thickest filled box, in PDF points, still read as a rule. */
+const MAX_RULE_THICKNESS = 3;
+/** Shortest line, in PDF points, read as a rule rather than a tick or a glyph detail. */
+const MIN_RULE_LENGTH = 6;
+/** Largest deviation, in PDF points, of a segment still read as vertical or horizontal. */
+const AXIS_TOLERANCE = 0.5;
 
 /**
  * Returns the Emscripten heap backing a PDFium module.
@@ -85,6 +99,52 @@ function unionBoxes(boxes: readonly BoundingBox[]): BoundingBox {
   const right = Math.max(...boxes.map((box) => box.x + box.width));
   const bottom = Math.max(...boxes.map((box) => box.y + box.height));
   return { x, y, width: right - x, height: bottom - y };
+}
+
+/** A straight segment in page space, in PDF points with a bottom-left origin. */
+interface Segment {
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+}
+
+/**
+ * Converts an axis-aligned segment into a normalized rule.
+ *
+ * @param segment - Segment in PDF points
+ * @param width - Page width in PDF points
+ * @param height - Page height in PDF points
+ * @returns The rule and its direction, or `undefined` for a short or slanted segment
+ */
+function ruleOf(
+  segment: Segment,
+  width: number,
+  height: number,
+): { readonly vertical: boolean; readonly rule: PageRule } | undefined {
+  const dx = Math.abs(segment.x1 - segment.x0);
+  const dy = Math.abs(segment.y1 - segment.y0);
+  if (dx <= AXIS_TOLERANCE && dy >= MIN_RULE_LENGTH) {
+    return {
+      vertical: true,
+      rule: {
+        position: clamp((segment.x0 + segment.x1) / 2 / width),
+        start: clamp(1 - Math.max(segment.y0, segment.y1) / height),
+        end: clamp(1 - Math.min(segment.y0, segment.y1) / height),
+      },
+    };
+  }
+  if (dy <= AXIS_TOLERANCE && dx >= MIN_RULE_LENGTH) {
+    return {
+      vertical: false,
+      rule: {
+        position: clamp(1 - (segment.y0 + segment.y1) / 2 / height),
+        start: clamp(Math.min(segment.x0, segment.x1) / width),
+        end: clamp(Math.max(segment.x0, segment.x1) / width),
+      },
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -208,6 +268,107 @@ class PdfiumPage implements PdfPage {
       this.module.pdfium.wasmExports.free(boxPointer);
       this.module.FPDFText_ClosePage(textPage);
     }
+  }
+
+  /** {@inheritDoc @familis/scribe#PdfPage.rules} */
+  async rules(signal?: AbortSignal): Promise<PageRules> {
+    this.#assertOpen();
+    abortIfNeeded(signal);
+    // Every straight, axis-aligned segment of a stroked path is a rule, which covers lines, stroked
+    // rectangles and grids drawn as one path. A filled path is a rule when its bounds are a thin,
+    // long box. Paths nested in form XObjects are not read.
+    const vertical: PageRule[] = [];
+    const horizontal: PageRule[] = [];
+    /**
+     * Records a segment when it is a rule.
+     *
+     * @param segment - Segment in page space
+     */
+    const add = (segment: Segment): void => {
+      const found = ruleOf(segment, this.width, this.height);
+      if (found) (found.vertical ? vertical : horizontal).push(found.rule);
+    };
+    const scratch = this.module.pdfium.wasmExports.malloc(6 * Float32Array.BYTES_PER_ELEMENT);
+    /**
+     * Reads a 32-bit float written by PDFium into the scratch buffer.
+     *
+     * @param index - Float index within the scratch buffer
+     * @returns The float value
+     */
+    const float = (index: number): number =>
+      Number(this.module.pdfium.getValue(scratch + index * 4, "float"));
+    try {
+      const count = this.module.FPDFPage_CountObjects(this.pagePointer);
+      for (let index = 0; index < count; index += 1) {
+        if (index % 256 === 0) abortIfNeeded(signal);
+        const object = this.module.FPDFPage_GetObject(this.pagePointer, index);
+        if (!object || this.module.FPDFPageObj_GetType(object) !== PAGE_OBJECT_PATH) continue;
+        if (!this.module.FPDFPath_GetDrawMode(object, scratch, scratch + 4)) continue;
+        const stroked = this.module.pdfium.getValue(scratch + 4, "i32") !== 0;
+        const filled = this.module.pdfium.getValue(scratch, "i32") !== 0;
+
+        if (!stroked) {
+          const bounded =
+            filled &&
+            this.module.FPDFPageObj_GetBounds(
+              object,
+              scratch,
+              scratch + 4,
+              scratch + 8,
+              scratch + 12,
+            );
+          if (!bounded) continue;
+          const [left, bottom, right, top] = [float(0), float(1), float(2), float(3)];
+          if (right - left <= MAX_RULE_THICKNESS && top - bottom > (right - left) * 3) {
+            add({ x0: (left + right) / 2, y0: bottom, x1: (left + right) / 2, y1: top });
+          } else if (top - bottom <= MAX_RULE_THICKNESS && right - left > (top - bottom) * 3) {
+            add({ x0: left, y0: (bottom + top) / 2, x1: right, y1: (bottom + top) / 2 });
+          }
+          continue;
+        }
+
+        if (!this.module.FPDFPageObj_GetMatrix(object, scratch)) continue;
+        const [a, b, c, d, e, f] = [float(0), float(1), float(2), float(3), float(4), float(5)];
+        /**
+         * Maps a path point to page space with the object's matrix.
+         *
+         * @param x - Horizontal path coordinate
+         * @param y - Vertical path coordinate
+         * @returns The point in PDF points
+         */
+        const toPage = (x: number, y: number): { x: number; y: number } => ({
+          x: a * x + c * y + e,
+          y: b * x + d * y + f,
+        });
+        let current: { x: number; y: number } | undefined;
+        let subpathStart: { x: number; y: number } | undefined;
+        const segments = this.module.FPDFPath_CountSegments(object);
+        for (let segmentIndex = 0; segmentIndex < segments; segmentIndex += 1) {
+          const segment = this.module.FPDFPath_GetPathSegment(object, segmentIndex);
+          if (!segment || !this.module.FPDFPathSegment_GetPoint(segment, scratch, scratch + 4)) {
+            continue;
+          }
+          const point = toPage(float(0), float(1));
+          const type = this.module.FPDFPathSegment_GetType(segment);
+          if (type === SEGMENT_MOVE) {
+            subpathStart = point;
+          } else if (type === SEGMENT_LINE && current) {
+            add({ x0: current.x, y0: current.y, x1: point.x, y1: point.y });
+          }
+          current = point;
+          if (this.module.FPDFPathSegment_GetClose(segment) && subpathStart) {
+            add({ x0: point.x, y0: point.y, x1: subpathStart.x, y1: subpathStart.y });
+            current = subpathStart;
+          }
+        }
+      }
+    } finally {
+      this.module.pdfium.wasmExports.free(scratch);
+    }
+    return {
+      vertical: vertical.toSorted((left, right) => left.position - right.position),
+      horizontal: horizontal.toSorted((left, right) => left.position - right.position),
+    };
   }
 
   /** {@inheritDoc @familis/scribe#PdfPage.render} */

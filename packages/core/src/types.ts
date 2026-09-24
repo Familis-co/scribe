@@ -53,6 +53,24 @@ export interface PageBitmap {
   readonly dpi?: number;
 }
 
+/** A straight line drawn on a page, such as a table border, in normalized coordinates. */
+export interface PageRule {
+  /** Horizontal position of a vertical rule, or vertical position of a horizontal one. */
+  readonly position: number;
+  /** Top of a vertical rule, or left end of a horizontal one. */
+  readonly start: number;
+  /** Bottom of a vertical rule, or right end of a horizontal one. */
+  readonly end: number;
+}
+
+/** Rules drawn on one page, as returned by {@link PdfPage.rules}. */
+export interface PageRules {
+  /** Vertical rules, from left to right. */
+  readonly vertical: readonly PageRule[];
+  /** Horizontal rules, from top to bottom. */
+  readonly horizontal: readonly PageRule[];
+}
+
 /** Options passed to {@link PdfPage.render}. */
 export interface PdfRenderOptions {
   /** Target pixel density. */
@@ -87,6 +105,16 @@ export interface PdfPage {
    * @returns The rendered page bitmap
    */
   render(options: PdfRenderOptions): Promise<PageBitmap>;
+  /**
+   * Lists the straight rules drawn on the page, used to find table column boundaries.
+   *
+   * @remarks
+   * Optional: adapters that cannot read vector graphics omit the method.
+   *
+   * @param signal - Optional cancellation signal
+   * @returns The page's vertical and horizontal rules
+   */
+  rules?(signal?: AbortSignal): Promise<PageRules>;
 }
 
 /** An open PDF document whose resources must be released with {@link PdfDocument.close}. */

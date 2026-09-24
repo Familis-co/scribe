@@ -289,10 +289,48 @@ visits: field.table({
 5. **Evidence:** one entry per non-empty cell, keyed by pointers such as `/visits/3/date`, numbered
    after filtering. `warnBelowConfidence` applies to every cell.
 
-Lines are grouped by position, so tables read the same from native, OCR and mixed pages. Keep the
-selector tight around the table: lines below the last row join it. When a page has no matching
-header the table is treated like a missing field, and each selected page is laid out on its own, so
-a header repeated on every page continues the table.
+Lines are grouped by position, so tables read the same from native, OCR and mixed pages. When a
+page has no matching header the table is treated like a missing field, and each selected page is
+laid out on its own, so a header repeated on every page continues the table.
+
+#### Real-world tables
+
+Four options make tables hold up on real documents. Without them, and without rules on the page,
+the layout is the one described above.
+
+```ts
+field.table({
+  select,
+  columns,
+  rowKey: "start",
+  fuzzy: 0.7, // header label similarity; omitted = exact
+  minColumns: "half", // "all" (default), "half", or a count
+  rowTolerance: 0.5, // in median row pitches; omitted = unbounded
+  useRules: true, // default
+});
+```
+
+- **`rowTolerance`:** the row pitch is the median distance between the header and successive row
+  starts. A body line farther than `rowTolerance` pitches from every row, such as a footer note or a
+  total line under the table, is dropped instead of joining the last row, and a `TABLE_LINES_DROPPED`
+  info diagnostic lists its text. A row start closer than 0.6 pitch to the previous one is a
+  wrapped fragment of that row rather than a new row. Without `rowTolerance`, keep the selector
+  tight around the table: every line below the last row joins it.
+- **`fuzzy`:** a literal label without an exact match is compared with runs of 1 to 3 tokens, scored
+  like [fuzzy anchors](#fuzzy-anchors), so an OCR'd `Travai1leur` still finds `Travailleur`.
+  Patterns stay exact.
+- **`minColumns`:** the header is the first line where at least this many labels match, and the
+  `rowKey` column's label must always be one of them. A column whose label is missing gets no span:
+  its cells are `null`, its `required` flag is ignored, and a `TABLE_COLUMN_NOT_FOUND` warning names
+  it. Without rules, its values fall into the nearest located column.
+- **Rules:** when the PDF adapter reads vector graphics (`@familis/scribe-pdfium` does) and the
+  vertical rules crossing the table put every located label in its own slot, the slots are the
+  column spans. Bordered tables state their boundaries exactly, so a centered header over
+  left-aligned values no longer matters. A token crossing a rule, such as a value overhanging its
+  cell, is split there when each side keeps at least 3 characters and a quarter of the token;
+  otherwise it stays whole. Tokens in a slot without a label are ignored. When the rules do not
+  separate every label, boundaries fall back to label midpoints. Set `useRules: false` to always use
+  midpoints; rules are only read for profiles with a table that uses them.
 
 ### Built-in transforms
 
@@ -484,6 +522,10 @@ are available from the testing export:
 ```ts
 import { verifyOcrEngineContract, verifyPdfEngineContract } from "@familis/scribe/testing";
 ```
+
+`PdfPage.rules()` is optional. A PDF adapter that implements it returns the page's vertical and
+horizontal rules in normalized coordinates, sorted by position, and `field.table` uses them as
+column boundaries. `verifyPdfEngineContract` checks them when the method is present.
 
 ## Runtime support
 

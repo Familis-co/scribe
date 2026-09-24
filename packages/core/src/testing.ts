@@ -9,8 +9,9 @@ import type { OcrEngine, PageBitmap, PdfEngine } from "./types.js";
  * Runs reusable behavioral checks against a PDF adapter.
  *
  * @remarks
- * The helper opens the fixture, validates page metadata, normalized native token boxes, and a
- * grayscale render, then closes both the document and engine.
+ * The helper opens the fixture, validates page metadata, normalized native token boxes, a grayscale
+ * render and, when the adapter implements it, normalized page rules, then closes both the document
+ * and engine.
  *
  * @param engine - Adapter instance under test
  * @param fixture - Valid PDF bytes containing at least one page
@@ -39,6 +40,20 @@ export async function verifyPdfEngineContract(
     const bitmap = await page.render({ dpi: 72, grayscale: true });
     if (bitmap.format !== "gray8" || bitmap.data.length !== bitmap.width * bitmap.height) {
       throw new Error("A grayscale PDF render must contain exactly one byte per pixel.");
+    }
+    if (page.rules) {
+      const rules = await page.rules();
+      for (const rule of [...rules.vertical, ...rules.horizontal]) {
+        const { position, start, end } = rule;
+        if ([position, start, end].some((value) => !(value >= 0 && value <= 1)) || start > end) {
+          throw new Error("Page rules must use normalized coordinates with start before end.");
+        }
+      }
+      for (const list of [rules.vertical, rules.horizontal]) {
+        if (list.some((rule, index) => index > 0 && rule.position < list[index - 1]!.position)) {
+          throw new Error("Page rules must be sorted by position.");
+        }
+      }
     }
   } finally {
     await document.close();

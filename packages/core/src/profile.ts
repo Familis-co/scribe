@@ -172,6 +172,14 @@ export interface TableDefinition {
   readonly columns: readonly TableColumnDefinition[];
   /** Key of the column whose tokens start a new row. */
   readonly rowKey: string;
+  /** Minimum similarity for fuzzy literal header labels. Omitted, labels match exactly. */
+  readonly fuzzy?: number;
+  /** Labels that must match for a line to be the header: all of them, half of them, or a count. */
+  readonly minColumns: "all" | "half" | number;
+  /** Largest distance between a body line and its row, as a fraction of the median row pitch. */
+  readonly rowTolerance?: number;
+  /** Whether vertical rules drawn on the page define the column spans when the adapter reads them. */
+  readonly useRules: boolean;
   /** Predicate keeping rows after cell transforms. */
   readonly filter?: (row: Readonly<Record<string, unknown>>) => boolean;
   /** Whether a missing table header makes extraction fail. */
@@ -277,6 +285,27 @@ export interface TableOptions {
   readonly columns: readonly TableColumnOptions[];
   /** Key of the column whose tokens start a new row. */
   readonly rowKey: string;
+  /**
+   * Minimum similarity, above `0` and at most `1`, for a literal header label that has no exact
+   * match. Omitted, labels match exactly.
+   */
+  readonly fuzzy?: number;
+  /**
+   * Labels that must match for a line to be the header: `"all"`, `"half"` (rounded up), or a count.
+   * The `rowKey` column's label must always match. @defaultValue `"all"`
+   */
+  readonly minColumns?: "all" | "half" | number;
+  /**
+   * Largest distance between a body line and its row, as a fraction of the median row pitch. Lines
+   * farther from every row are dropped rather than merged into the nearest one. Omitted, every line
+   * joins its nearest row.
+   */
+  readonly rowTolerance?: number;
+  /**
+   * Whether vertical rules drawn on the page define the column spans, when the PDF adapter reads
+   * rules and they separate every located header. @defaultValue `true`
+   */
+  readonly useRules?: boolean;
   /** Predicate keeping rows after cell transforms. */
   readonly filter?: (row: Readonly<Record<string, unknown>>) => boolean;
   /** Whether the table header must be found. @defaultValue `true` */
@@ -397,16 +426,19 @@ export const field = {
    * Creates a table field extracted as an array of rows keyed by column.
    *
    * @remarks
-   * The header is the first line where every column label matches, and column boundaries sit
-   * halfway between adjacent label centers. A row starts at every line with a token in the `rowKey`
-   * column; other lines join the vertically nearest row. A failing cell transform sets the cell to
-   * `null`, and a row missing a required cell is dropped. Both emit a diagnostic.
+   * The header is the first line where `minColumns` column labels match, and column boundaries sit
+   * halfway between adjacent label centers, or on the page's vertical rules when they separate every
+   * header. A row starts at every line with a token in the `rowKey` column; other lines join the
+   * vertically nearest row, within `rowTolerance` when it is set. A failing cell transform sets the
+   * cell to `null`, and a row missing a required cell is dropped. Both emit a diagnostic.
    *
-   * @param options - Selection, columns, row key, filter, and requirement options
+   * @param options - Selection, columns, row key, header, row, filter, and requirement options
    * @returns A table field definition
    *
    * @throws `TypeError` when no column is given, a key is repeated, or `rowKey` names no column
-   * @throws `RangeError` when `warnBelowConfidence` is outside `[0, 1]`
+   * @throws `RangeError` when `warnBelowConfidence` is outside `[0, 1]`, `fuzzy` is not above `0`
+   * and at most `1`, `minColumns` is not a count from 1 to the number of columns, or `rowTolerance`
+   * is not positive
    */
   table(options: TableOptions): TableDefinition {
     const keys = options.columns.map((column) => column.key);
@@ -417,6 +449,19 @@ export const field = {
       throw new TypeError(`rowKey "${options.rowKey}" does not name a table column.`);
     }
     assertConfidenceThreshold(options.warnBelowConfidence);
+    const minColumns = options.minColumns ?? "all";
+    if (
+      typeof minColumns === "number" &&
+      (!Number.isInteger(minColumns) || minColumns < 1 || minColumns > keys.length)
+    ) {
+      throw new RangeError("minColumns must be a count from 1 to the number of columns.");
+    }
+    if (
+      options.rowTolerance !== undefined &&
+      (!Number.isFinite(options.rowTolerance) || options.rowTolerance <= 0)
+    ) {
+      throw new RangeError("rowTolerance must be a positive number.");
+    }
     return {
       _tag: "Table",
       selector: options.select,
@@ -427,6 +472,10 @@ export const field = {
         required: column.required ?? true,
       })),
       rowKey: options.rowKey,
+      ...fuzzyOption(options.fuzzy),
+      minColumns,
+      ...(options.rowTolerance === undefined ? {} : { rowTolerance: options.rowTolerance }),
+      useRules: options.useRules ?? true,
       ...(options.filter ? { filter: options.filter } : {}),
       required: options.required ?? true,
       ...(options.warnBelowConfidence === undefined
