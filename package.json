@@ -3,14 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "description": "Structured PDF extraction and OCR for Node.js and Bun",
-  "homepage": "https://github.com/familis-co/scribe#readme",
+  "homepage": "https://github.com/Familis-co/scribe#readme",
   "bugs": {
-    "url": "https://github.com/familis-co/scribe/issues"
+    "url": "https://github.com/Familis-co/scribe/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/familis-co/scribe.git"
+    "url": "git+https://github.com/Familis-co/scribe.git"
   },
   "type": "module",
   "scripts": {
