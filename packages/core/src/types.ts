@@ -216,6 +216,14 @@ export interface ParseOptions {
   readonly signal?: AbortSignal;
 }
 
+/** Per-call options of {@link Scribe.identify}. */
+export interface IdentifyOptions {
+  /** Password for an encrypted PDF. */
+  readonly password?: string;
+  /** Signal used to cancel identification. */
+  readonly signal?: AbortSignal;
+}
+
 /** Label matched by a fuzzy anchor selector. */
 export interface AnchorEvidence {
   /** Space-joined text of the tokens that matched the anchor label. */
@@ -311,6 +319,10 @@ export interface Scribe {
    * @throws {@link InvalidPdfError}
    * Thrown when the PDF is malformed or unsupported.
    *
+   * @throws {@link ProfileMismatchError}
+   * Thrown before any rendering or OCR when the profile declares `identify` and the document's
+   * native text does not satisfy it.
+   *
    * @throws {@link ExtractionError}
    * Thrown when required fields cannot be extracted.
    *
@@ -322,6 +334,29 @@ export interface Scribe {
     profile: DocumentProfile<S>,
     options?: ParseOptions,
   ): Promise<ExtractionResult<StandardSchemaV1.InferOutput<S>>>;
+  /**
+   * Picks the profile describing a document from its native text layer, without rendering or OCR.
+   *
+   * @typeParam P - Candidate profile type
+   * @param input - PDF bytes as an `ArrayBuffer` or `Uint8Array`
+   * @param profiles - Candidate profiles, each declaring `identify`
+   * @param options - Password and cancellation options
+   * @returns The only candidate whose `identify` rules the document satisfies
+   *
+   * @throws `TypeError`
+   * Thrown before the document is opened when no profile is given or one lacks `identify`.
+   *
+   * @throws {@link ProfileMismatchError}
+   * Thrown when the document matches no candidate.
+   *
+   * @throws {@link AmbiguousProfileError}
+   * Thrown when the document matches several candidates, listed in `profileIds`.
+   */
+  identify<P extends DocumentProfile>(
+    input: BinaryInput,
+    profiles: readonly P[],
+    options?: IdentifyOptions,
+  ): Promise<P>;
   /** Closes configured engines. Repeated calls return the same completed operation. */
   close(): Promise<void>;
 }

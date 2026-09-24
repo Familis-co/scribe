@@ -217,6 +217,29 @@ export interface ProfileOcrOptions {
   readonly regions?: readonly OcrRegion[];
 }
 
+/** Native text of a document, passed to {@link ProfileIdentify.test}. */
+export interface IdentifyContext {
+  /** Text of every page, joined by newlines. */
+  readonly text: string;
+  /** Text of each page: tokens joined by spaces and visual lines by newlines. */
+  readonly pages: readonly string[];
+  /** Number of pages in the document. */
+  readonly pageCount: number;
+}
+
+/**
+ * Rules telling whether a document is the kind a profile describes, checked against the native text
+ * layer before any rendering or OCR.
+ */
+export interface ProfileIdentify {
+  /** Literals or patterns that must all be found in the native text. */
+  readonly text?: readonly (string | RegExp)[];
+  /** Whether literal `text` entries preserve case. Patterns carry their own flags. @defaultValue `false` */
+  readonly caseSensitive?: boolean;
+  /** Extra predicate, run once every `text` entry is found. */
+  readonly test?: (context: IdentifyContext) => boolean | Promise<boolean>;
+}
+
 /**
  * Declarative extraction profile coupled to a Standard Schema output validator.
  *
@@ -235,6 +258,12 @@ export interface DocumentProfile<S extends StandardSchemaV1 = StandardSchemaV1> 
   readonly fields: FieldTree;
   /** OCR options. Without `regions`, OCR recognizes and replaces whole pages. */
   readonly ocr?: ProfileOcrOptions;
+  /**
+   * Rules identifying the document type from its native text. A document failing them is rejected
+   * with `ProfileMismatchError` before any rendering or OCR, and `Scribe.identify` uses them to
+   * pick a profile.
+   */
+  readonly identify?: ProfileIdentify;
 }
 
 /** Options shared by scalar and repeated field builders. */
@@ -742,7 +771,8 @@ export const transform = {
  * @param profile - Profile definition
  * @returns The same profile with preserved type inference
  *
- * @throws `TypeError` when no non-empty OCR language is declared, or `ocr.regions` is empty
+ * @throws `TypeError` when no non-empty OCR language is declared, `ocr.regions` is empty, or
+ * `identify` declares neither a non-empty `text` nor a `test`, or an empty literal
  * @throws `RangeError` when an OCR region has an invalid page or a box outside the page
  */
 export function defineProfile<S extends StandardSchemaV1>(
@@ -773,6 +803,15 @@ export function defineProfile<S extends StandardSchemaV1>(
       y + height > 1 + Number.EPSILON * 4
     ) {
       throw new RangeError("An OCR region box must be a non-empty rectangle inside the page.");
+    }
+  }
+  if (profile.identify) {
+    const { text = [], test } = profile.identify;
+    if (text.length === 0 && !test) {
+      throw new TypeError("identify must declare at least one text entry or a test.");
+    }
+    if (text.some((entry) => entry === "")) {
+      throw new TypeError("identify text entries must not be empty.");
     }
   }
   return profile;

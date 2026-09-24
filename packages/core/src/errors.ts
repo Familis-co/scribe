@@ -9,6 +9,8 @@ export type ScribeErrorCode =
   | "OCR_ERROR"
   | "EXTRACTION_ERROR"
   | "VALIDATION_ERROR"
+  | "PROFILE_MISMATCH"
+  | "AMBIGUOUS_PROFILE"
   | "ABORTED"
   | "DISPOSED";
 
@@ -117,6 +119,42 @@ export class ValidationError extends ScribeError {
   }
 }
 
+/** Thrown when a document is not the kind its profile, or any candidate profile, identifies. */
+export class ProfileMismatchError extends ScribeError {
+  readonly code = "PROFILE_MISMATCH" as const;
+
+  /**
+   * Creates a profile mismatch error.
+   *
+   * @param message - Human-readable explanation, naming the rules that failed
+   * @param profileIds - Identifiers of the profiles the document was checked against
+   */
+  constructor(
+    message: string,
+    readonly profileIds: readonly string[],
+  ) {
+    super(message);
+  }
+}
+
+/** Thrown when a document matches the identification rules of several candidate profiles. */
+export class AmbiguousProfileError extends ScribeError {
+  readonly code = "AMBIGUOUS_PROFILE" as const;
+
+  /**
+   * Creates an ambiguous profile error.
+   *
+   * @param message - Human-readable explanation
+   * @param profileIds - Identifiers of every matching profile
+   */
+  constructor(
+    message: string,
+    readonly profileIds: readonly string[],
+  ) {
+    super(message);
+  }
+}
+
 /** Thrown when an operation observes an aborted signal. */
 export class AbortError extends ScribeError {
   readonly code = "ABORTED" as const;
@@ -151,5 +189,7 @@ export type AnyScribeError =
   | OcrError
   | ExtractionError
   | ValidationError
+  | ProfileMismatchError
+  | AmbiguousProfileError
   | AbortError
   | DisposedError;

@@ -108,6 +108,44 @@ Every profile declares:
 Profiles are TypeScript objects. Functions and regular expressions are supported, so profiles are
 not JSON serializable.
 
+### Identifying the document type
+
+A profile can say which documents it describes, so a PDF of another type is rejected up front
+instead of failing late with missing fields, or worse, passing with meaningless data:
+
+```ts
+defineProfile({
+  id: "visit-schedule",
+  version: "1",
+  languages: ["fra"],
+  identify: {
+    // All must be found in the native text layer. Literals ignore case unless caseSensitive is set.
+    text: [/travailleur/iu, "durée"],
+    // Optional; runs once every text entry is found.
+    test: ({ text, pages, pageCount }) => pageCount <= 3,
+  },
+  schema,
+  fields,
+});
+```
+
+`identify` is checked against the native text right after it is extracted, before any page is
+rendered or OCR'd, so a mismatch costs no OCR. The text given to it and to `test` joins each page's
+tokens with spaces and its visual lines with newlines. A document that fails throws
+`ProfileMismatchError`, whose message names every rule that failed. Profiles without `identify`
+parse any document.
+
+An application that accepts several document formats can let Scribe pick the profile:
+
+```ts
+const profile = await scribe.identify(bytes, [scheduleProfile, invoiceProfile]);
+const result = await scribe.parse(bytes, profile);
+```
+
+`scribe.identify` reads the native text only and returns the single matching profile. It throws
+`ProfileMismatchError` when none matches and `AmbiguousProfileError` when several do, both with the
+profile ids in `profileIds`. Every candidate must declare `identify`.
+
 ### Coordinates and pages
 
 All boxes use normalized coordinates from `0` to `1`, with the origin at the top-left:
@@ -482,17 +520,19 @@ documents should also use request throttling or a job queue.
 
 All library errors extend `ScribeError` and expose a stable `code`:
 
-| Error                | Code               |
-| -------------------- | ------------------ |
-| `InvalidPdfError`    | `INVALID_PDF`      |
-| `EncryptedPdfError`  | `ENCRYPTED_PDF`    |
-| `LimitExceededError` | `LIMIT_EXCEEDED`   |
-| `PdfEngineError`     | `PDF_ENGINE_ERROR` |
-| `OcrError`           | `OCR_ERROR`        |
-| `ExtractionError`    | `EXTRACTION_ERROR` |
-| `ValidationError`    | `VALIDATION_ERROR` |
-| `AbortError`         | `ABORTED`          |
-| `DisposedError`      | `DISPOSED`         |
+| Error                   | Code                |
+| ----------------------- | ------------------- |
+| `InvalidPdfError`       | `INVALID_PDF`       |
+| `EncryptedPdfError`     | `ENCRYPTED_PDF`     |
+| `LimitExceededError`    | `LIMIT_EXCEEDED`    |
+| `PdfEngineError`        | `PDF_ENGINE_ERROR`  |
+| `OcrError`              | `OCR_ERROR`         |
+| `ExtractionError`       | `EXTRACTION_ERROR`  |
+| `ValidationError`       | `VALIDATION_ERROR`  |
+| `ProfileMismatchError`  | `PROFILE_MISMATCH`  |
+| `AmbiguousProfileError` | `AMBIGUOUS_PROFILE` |
+| `AbortError`            | `ABORTED`           |
+| `DisposedError`         | `DISPOSED`          |
 
 ```ts
 import { ScribeError } from "@familis/scribe";
@@ -507,7 +547,8 @@ try {
 ```
 
 `ValidationError` includes normalized issues and the raw intermediate value. `ExtractionError`
-contains the missing JSON pointer paths.
+contains the missing JSON pointer paths. `ProfileMismatchError` and `AmbiguousProfileError` carry
+the profile ids involved in `profileIds`.
 
 ## Lifecycle
 
