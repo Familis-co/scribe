@@ -122,7 +122,7 @@ export interface FieldOptions {
   readonly transforms?: readonly TransformDefinition[];
   /** Whether the field must be resolved. @defaultValue `true` */
   readonly required?: boolean;
-  /** Emit a diagnostic when OCR confidence for the selected region is below this value. */
+  /** Emit a diagnostic when the lowest OCR confidence behind a captured value is below this value. */
   readonly warnBelowConfidence?: number;
   /** Value returned when selection or capture produces no value. */
   readonly defaultValue?: unknown;
