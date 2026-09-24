@@ -72,19 +72,20 @@ try {
 
 ## Options
 
-| Option                | Required | Description                                                                               |
-| --------------------- | -------- | ----------------------------------------------------------------------------------------- |
-| `languageDataPath`    | Yes      | Local path or explicitly configured Tesseract.js language-data location.                  |
-| `compressed`          | No       | Whether language files are gzipped (`.traineddata.gz`). Defaults to `true`.               |
-| `cachePath`           | No       | Writable directory for the language-data cache. Omitted, no cache is used.                |
-| `workerPath`          | No       | Custom Tesseract.js worker script location.                                               |
-| `corePath`            | No       | Custom Tesseract.js core/WASM location.                                                   |
-| `concurrency`         | No       | Number of OCR workers per language set. Defaults to `1`.                                  |
-| `logger`              | No       | Receives Tesseract.js progress messages.                                                  |
-| `preprocess`          | No       | `{ threshold, sharpen }` image adjustments before recognition. All off by default.        |
-| `pageSegMode`         | No       | Tesseract page segmentation mode (`PSM`). Defaults to Tesseract's `PSM.AUTO`.             |
-| `minWordConfidence`   | No       | Drops words whose confidence (`0`–`1`) is below this value. Defaults to `0`, keeping all. |
-| `dropPunctuationOnly` | No       | Drops words with no letter or digit, such as `\|` or `'`. Defaults to `false`.            |
+| Option                | Required | Description                                                                                       |
+| --------------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `languageDataPath`    | Yes      | Local path or explicitly configured Tesseract.js language-data location.                          |
+| `compressed`          | No       | Whether language files are gzipped (`.traineddata.gz`). Defaults to `true`.                       |
+| `cachePath`           | No       | Writable directory for the language-data cache. Omitted, no cache is used.                        |
+| `workerPath`          | No       | Custom Tesseract.js worker script location.                                                       |
+| `corePath`            | No       | Custom Tesseract.js core/WASM location.                                                           |
+| `concurrency`         | No       | Number of OCR workers per language set. Defaults to `1`.                                          |
+| `logger`              | No       | Receives Tesseract.js progress messages.                                                          |
+| `upscale`             | No       | Lanczos upscaling of low-DPI bitmaps, or `false`. Defaults to `{ targetDpi: 300, maxFactor: 4 }`. |
+| `preprocess`          | No       | `{ threshold, sharpen }` image adjustments before recognition. All off by default.                |
+| `pageSegMode`         | No       | Tesseract page segmentation mode (`PSM`). Defaults to Tesseract's `PSM.AUTO`.                     |
+| `minWordConfidence`   | No       | Drops words whose confidence (`0`–`1`) is below this value. Defaults to `0`, keeping all.         |
+| `dropPunctuationOnly` | No       | Drops words with no letter or digit, such as `\|` or `'`. Defaults to `false`.                    |
 
 Without `cachePath`, Tesseract.js reads `languageDataPath` directly and writes nothing. Setting it
 makes Tesseract.js keep a copy of each language it loads there and read it back on later starts.
@@ -129,12 +130,39 @@ interface PageBitmap {
 }
 ```
 
-Sharp converts the raw bitmap to PNG. When `dpi` is present, it is written into the PNG metadata;
-otherwise the adapter uses 300 DPI. OCR tokens are normalized to top-left coordinates between `0`
-and `1`, with confidence values between `0` and `1`.
+Sharp prepares each bitmap in this order before encoding it as PNG:
+
+1. **Upscale.** A bitmap whose `dpi` is below `upscale.targetDpi` (300 by default) is enlarged with
+   a Lanczos kernel by `targetDpi / dpi`, capped at `upscale.maxFactor` (4 by default). A 96 DPI
+   bitmap is enlarged by 3.125 to 300 DPI; a 50 DPI one by 4, to 200 DPI. A bitmap at or above the
+   target, or without `dpi`, keeps its size.
+2. **`preprocess`.** Sharpening and thresholding, when configured, run on the upscaled pixels.
+
+The resulting density is written into the PNG metadata and passed to Tesseract as
+`user_defined_dpi`: the bitmap `dpi` times the upscale factor, or 300 DPI when `dpi` is unknown.
+Tesseract also runs with `preserve_interword_spaces` enabled, so multi-word values keep their
+spacing.
+
+Tesseract reads best at about 300 DPI of glyph detail, and a low-resolution input, such as an
+embedded 96 DPI image, reaches it far below that. A proper resampling kernel recovers much of what
+thresholding cannot: a high cutoff breaks strokes that the plain upscale reads correctly. Set
+`upscale: false` to send every bitmap at its own size:
+
+```ts
+const ocr = await createTesseractEngine({
+  languageDataPath: "/opt/tessdata",
+  upscale: { targetDpi: 300, maxFactor: 4 },
+});
+```
+
+`targetDpi` must be a finite number above `0`, and `maxFactor` a finite number of at least `1`.
+
+OCR tokens are normalized to top-left coordinates between `0` and `1` of the input bitmap, whatever
+the upscale, with confidence values between `0` and `1`.
 
 The standard PDFium adapter supplies the requested render density. The core pipeline renders OCR
-pages in grayscale at 300 DPI and skips visually blank pages before invoking this adapter.
+pages in grayscale at 300 DPI, which upscaling leaves untouched, and skips visually blank pages
+before invoking this adapter.
 
 ## Preprocessing and page segmentation
 
