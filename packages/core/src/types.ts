@@ -194,11 +194,14 @@ export interface FieldEvidence {
   readonly page: number;
   /** Normalized source region. */
   readonly box: BoundingBox;
-  /** Raw selected text before field transformations. */
+  /**
+   * Raw text of the tokens backing the value, before field transformations. With a `pattern`, only
+   * the tokens overlapping the captured group; without one, every selected token.
+   */
   readonly text: string;
   /** Native extraction or OCR. */
   readonly method: TextSource;
-  /** Average OCR confidence for the selected tokens. */
+  /** Lowest OCR confidence among the tokens backing the value. */
   readonly confidence?: number;
   /** Ordered names of transformations applied to the captured value. */
   readonly transformations: readonly string[];

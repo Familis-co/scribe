@@ -194,8 +194,16 @@ const person = field.text({
 `maxDistance`. Ambiguous and distant values are unchanged. This makes it suitable for an explicit
 business reference list, but not for guessing unknown names.
 
-A low-confidence value produces a `LOW_FIELD_CONFIDENCE` diagnostic. Evidence retains the raw OCR
-text even if the validated data contains a corrected candidate.
+A value's confidence is the **lowest** OCR confidence among the tokens it was read from, so one
+uncertain character in an identifier is enough to raise a warning. With a `pattern`, only the tokens
+overlapping the captured group count: a misread date inside a well-read sentence is flagged on its
+own merits instead of inheriting the sentence's confidence. Without a `pattern`, every selected
+token counts. Native tokens carry no confidence.
+
+A low-confidence value produces a `LOW_FIELD_CONFIDENCE` diagnostic. For `field.list`, each value
+is scored separately and the diagnostic points at the item, such as `/codes/1`. Evidence retains
+the raw OCR text even if the validated data contains a corrected candidate; its `box` and `text`
+cover the tokens behind the captured value, and a list has one evidence entry per value.
 
 ## OCR modes
 
