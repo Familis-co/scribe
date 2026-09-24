@@ -23,6 +23,25 @@ language-data location. A local directory is recommended for production:
 └── fra.traineddata.gz
 ```
 
+By default the adapter reads gzipped `<lang>.traineddata.gz` files. For a directory of plain
+`<lang>.traineddata` files, the layout tessdata is distributed in, set `compressed: false`:
+
+```text
+/opt/tessdata/
+├── eng.traineddata
+└── fra.traineddata
+```
+
+```ts
+const ocr = await createTesseractEngine({
+  languageDataPath: "/opt/tessdata",
+  compressed: false,
+});
+```
+
+A language file that is missing or cannot be read rejects `recognize` with `OcrError`, whose `cause`
+names the file Tesseract.js tried to open.
+
 The adapter never selects a remote language-data source or automatically detects a language. Every
 document profile must declare its languages.
 
@@ -52,14 +71,15 @@ try {
 
 ## Options
 
-| Option             | Required | Description                                                              |
-| ------------------ | -------- | ------------------------------------------------------------------------ |
-| `languageDataPath` | Yes      | Local path or explicitly configured Tesseract.js language-data location. |
-| `cachePath`        | No       | Writable Tesseract.js cache directory.                                   |
-| `workerPath`       | No       | Custom Tesseract.js worker script location.                              |
-| `corePath`         | No       | Custom Tesseract.js core/WASM location.                                  |
-| `concurrency`      | No       | Number of OCR workers per language set. Defaults to `1`.                 |
-| `logger`           | No       | Receives Tesseract.js progress messages.                                 |
+| Option             | Required | Description                                                                 |
+| ------------------ | -------- | --------------------------------------------------------------------------- |
+| `languageDataPath` | Yes      | Local path or explicitly configured Tesseract.js language-data location.    |
+| `compressed`       | No       | Whether language files are gzipped (`.traineddata.gz`). Defaults to `true`. |
+| `cachePath`        | No       | Writable Tesseract.js cache directory.                                      |
+| `workerPath`       | No       | Custom Tesseract.js worker script location.                                 |
+| `corePath`         | No       | Custom Tesseract.js core/WASM location.                                     |
+| `concurrency`      | No       | Number of OCR workers per language set. Defaults to `1`.                    |
+| `logger`           | No       | Receives Tesseract.js progress messages.                                    |
 
 ```ts
 const ocr = await createTesseractEngine({
@@ -146,6 +166,12 @@ await ocr.close();
 
 An abort rejects the caller immediately. Tesseract.js work already executing inside a worker may
 finish internally before that worker accepts another job.
+
+A pool that fails to initialize is not kept: the next call for the same language set starts new
+workers, so language data added after the failure is picked up without a restart. Tesseract.js
+offers no way to terminate a worker whose language data failed to load, though, so each failed
+start leaves its worker threads idle and keeps Node.js from exiting on its own. Treat the
+`OcrError` as a configuration problem to fix rather than a call to retry in a loop.
 
 ## Container deployment
 
