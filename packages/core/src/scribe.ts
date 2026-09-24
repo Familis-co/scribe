@@ -1,15 +1,18 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import {
   AbortError,
+  AmbiguousProfileError,
   DisposedError,
   ExtractionError,
   LimitExceededError,
   OcrError,
   PdfEngineError,
+  ProfileMismatchError,
   ScribeError,
   ValidationError,
 } from "./errors.js";
 import { extractProfile, usesRules, type ExtractPage, type ProfileExtraction } from "./extract.js";
+import { identifyContext, unmatchedRules } from "./identify.js";
 import { centerY, visualLines } from "./lines.js";
 import type { DocumentProfile, OcrRegion } from "./profile.js";
 import type {
@@ -18,6 +21,7 @@ import type {
   CreateScribeOptions,
   Diagnostic,
   ExtractionResult,
+  IdentifyOptions,
   OcrEngine,
   PageBitmap,
   PageDiagnostic,
@@ -327,6 +331,23 @@ function asExtractPages(states: readonly MutablePageState[]): readonly ExtractPa
 }
 
 /**
+ * Extracts a page's native text.
+ *
+ * @param page - Page to read
+ * @param signal - Optional cancellation signal
+ * @returns Native text tokens
+ * @throws {@link PdfEngineError} when the PDF engine fails
+ */
+async function readText(page: PdfPage, signal?: AbortSignal): Promise<readonly TextToken[]> {
+  try {
+    return await page.extractText(signal);
+  } catch (cause) {
+    if (cause instanceof ScribeError) throw cause;
+    throw new PdfEngineError(`Native text extraction failed on page ${page.number}.`, { cause });
+  }
+}
+
+/**
  * Converts Standard Schema issues into validator-independent issues.
  *
  * @param issues - Issues reported by the profile schema
@@ -520,6 +541,54 @@ export function createScribe(options: CreateScribeOptions): Scribe {
     }
   };
 
+  /**
+   * Checks the input size, opens the document, and checks its page count.
+   *
+   * @param input - PDF bytes
+   * @param openOptions - Password and cancellation options
+   * @returns The open document, which the caller must close
+   * @throws {@link DisposedError} when the instance is closed
+   * @throws {@link LimitExceededError} when the input or its page count exceeds a limit
+   * @throws {@link PdfEngineError} when the PDF engine fails outside known document errors
+   */
+  const openDocument = async (
+    input: BinaryInput,
+    openOptions: IdentifyOptions,
+  ): Promise<PdfDocument> => {
+    if (closed) throw new DisposedError();
+    abortIfNeeded(openOptions.signal);
+    const bytes = bytesFrom(input);
+    if (bytes.byteLength > limits.maxBytes) {
+      throw new LimitExceededError(
+        `The PDF is ${bytes.byteLength} bytes, above the configured limit.`,
+        "bytes",
+        bytes.byteLength,
+        limits.maxBytes,
+      );
+    }
+
+    let document: PdfDocument;
+    try {
+      document = await options.pdf.open(bytes, {
+        ...(openOptions.password ? { password: openOptions.password } : {}),
+        ...(openOptions.signal ? { signal: openOptions.signal } : {}),
+      });
+    } catch (cause) {
+      if (cause instanceof ScribeError) throw cause;
+      throw new PdfEngineError("The PDF engine could not open the document.", { cause });
+    }
+    if (document.pageCount > limits.maxPages) {
+      await document.close();
+      throw new LimitExceededError(
+        `The PDF contains ${document.pageCount} pages, above the configured limit.`,
+        "pages",
+        document.pageCount,
+        limits.maxPages,
+      );
+    }
+    return document;
+  };
+
   return {
     /** {@inheritDoc Scribe.parse} */
     async parse<S extends StandardSchemaV1>(
@@ -527,39 +596,8 @@ export function createScribe(options: CreateScribeOptions): Scribe {
       profile: DocumentProfile<S>,
       parseOptions: ParseOptions = {},
     ): Promise<ExtractionResult<StandardSchemaV1.InferOutput<S>>> {
-      if (closed) throw new DisposedError();
-      abortIfNeeded(parseOptions.signal);
-      const bytes = bytesFrom(input);
-      if (bytes.byteLength > limits.maxBytes) {
-        throw new LimitExceededError(
-          `The PDF is ${bytes.byteLength} bytes, above the configured limit.`,
-          "bytes",
-          bytes.byteLength,
-          limits.maxBytes,
-        );
-      }
-
-      let document: PdfDocument;
+      const document = await openDocument(input, parseOptions);
       try {
-        document = await options.pdf.open(bytes, {
-          ...(parseOptions.password ? { password: parseOptions.password } : {}),
-          ...(parseOptions.signal ? { signal: parseOptions.signal } : {}),
-        });
-      } catch (cause) {
-        if (cause instanceof ScribeError) throw cause;
-        throw new PdfEngineError("The PDF engine could not open the document.", { cause });
-      }
-
-      try {
-        if (document.pageCount > limits.maxPages) {
-          throw new LimitExceededError(
-            `The PDF contains ${document.pageCount} pages, above the configured limit.`,
-            "pages",
-            document.pageCount,
-            limits.maxPages,
-          );
-        }
-
         const mode = parseOptions.ocr ?? "auto";
         const regions = profile.ocr?.regions
           ? regionsByPage(profile.ocr.regions, document.pageCount)
@@ -585,6 +623,8 @@ export function createScribe(options: CreateScribeOptions): Scribe {
         const ocrAllowed = (state: MutablePageState): boolean =>
           !regions || regions.has(state.page.number);
         const readRules = usesRules(profile.fields);
+        const skipNative = mode === "always" && !regions;
+        const identifyTokens: (readonly TextToken[])[] = [];
 
         const pages = await mapConcurrent(
           Array.from({ length: document.pageCount }, (_, index) => index),
@@ -601,25 +641,30 @@ export function createScribe(options: CreateScribeOptions): Scribe {
               throw new PdfEngineError(`Rule extraction failed on page ${page.number}.`, { cause });
             }
             const base = { page, source: "native" as const, ...(rules ? { rules } : {}) };
-            if (mode === "always" && !regions) {
+            if (skipNative && !profile.identify) {
               return { ...base, nativeTokens: [], tokens: [], durationMs: 0 };
             }
-            try {
-              const tokens = await page.extractText(parseOptions.signal);
-              return {
-                ...base,
-                nativeTokens: tokens,
-                tokens,
-                durationMs: performance.now() - started,
-              };
-            } catch (cause) {
-              if (cause instanceof ScribeError) throw cause;
-              throw new PdfEngineError(`Native text extraction failed on page ${page.number}.`, {
-                cause,
-              });
-            }
+            const tokens = await readText(page, parseOptions.signal);
+            identifyTokens[index] = tokens;
+            if (skipNative) return { ...base, nativeTokens: [], tokens: [], durationMs: 0 };
+            return {
+              ...base,
+              nativeTokens: tokens,
+              tokens,
+              durationMs: performance.now() - started,
+            };
           },
         );
+
+        if (profile.identify) {
+          const failures = await unmatchedRules(profile.identify, identifyContext(identifyTokens));
+          if (failures.length > 0) {
+            throw new ProfileMismatchError(
+              `The document does not match profile "${profile.id}": ${failures.join("; ")}.`,
+              [profile.id],
+            );
+          }
+        }
 
         if (mode === "always") {
           await mapConcurrent(pages.filter(ocrAllowed), limits.concurrency, ocrPage);
@@ -680,6 +725,56 @@ export function createScribe(options: CreateScribeOptions): Scribe {
           pages: pageDiagnostics(pages),
           diagnostics,
         };
+      } finally {
+        await document.close();
+      }
+    },
+
+    /** {@inheritDoc Scribe.identify} */
+    async identify<P extends DocumentProfile>(
+      input: BinaryInput,
+      profiles: readonly P[],
+      identifyOptions: IdentifyOptions = {},
+    ): Promise<P> {
+      if (profiles.length === 0) {
+        throw new TypeError("identify requires at least one candidate profile.");
+      }
+      const undeclared = profiles.filter((profile) => !profile.identify);
+      if (undeclared.length > 0) {
+        throw new TypeError(
+          `Profiles without identify rules cannot be identified: ${undeclared.map((profile) => profile.id).join(", ")}.`,
+        );
+      }
+
+      const document = await openDocument(input, identifyOptions);
+      try {
+        const tokens = await mapConcurrent(
+          Array.from({ length: document.pageCount }, (_, index) => index),
+          limits.concurrency,
+          async (index) => {
+            abortIfNeeded(identifyOptions.signal);
+            return readText(await document.getPage(index), identifyOptions.signal);
+          },
+        );
+        const context = identifyContext(tokens);
+        const matching: P[] = [];
+        for (const profile of profiles) {
+          if ((await unmatchedRules(profile.identify!, context)).length === 0)
+            matching.push(profile);
+        }
+        if (matching.length === 1) return matching[0]!;
+        if (matching.length === 0) {
+          const ids = profiles.map((profile) => profile.id);
+          throw new ProfileMismatchError(
+            `The document matches none of the profiles ${ids.join(", ")}.`,
+            ids,
+          );
+        }
+        const ids = matching.map((profile) => profile.id);
+        throw new AmbiguousProfileError(
+          `The document matches several profiles: ${ids.join(", ")}.`,
+          ids,
+        );
       } finally {
         await document.close();
       }
