@@ -1,6 +1,6 @@
 {
   "name": "@familis/scribe-tesseract",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Tesseract.js OCR adapter for @familis/scribe",
   "homepage": "https://github.com/Familis-co/scribe/tree/main/packages/tesseract#readme",
   "bugs": {

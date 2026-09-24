@@ -1,5 +1,21 @@
 # @familis/scribe-tesseract
 
+## 0.3.0
+
+### Minor Changes
+
+- c3f4bc6: Upscale low-resolution bitmaps before recognition. A bitmap whose `dpi` is below `upscale.targetDpi` (300 by default) is enlarged with a Lanczos kernel by `targetDpi / dpi`, capped at `upscale.maxFactor` (4 by default), before any `preprocess` step, so a 96 DPI image reaches Tesseract at 300 DPI. Bitmaps at or above the target, or without `dpi`, are unchanged, and `upscale: false` turns it off. Token boxes stay normalized to the input bitmap. Every job now passes its density to Tesseract as `user_defined_dpi` and enables `preserve_interword_spaces`, so multi-word values keep their spacing.
+- 7d188c5: Add `minWordConfidence` and `dropPunctuationOnly` options to `createTesseractEngine`. `minWordConfidence` (a number from 0 to 1) drops recognized words below that confidence, and `dropPunctuationOnly` drops words with no letter or digit, such as `|`, `'` or `—`, while keeping `N°` and `1/2`. Both are off by default, and the page-level confidence stays Tesseract's own. `OcrResult` gains an optional `droppedTokenCount`, which the Tesseract adapter always reports and which `PageDiagnostic` surfaces per page, summed across OCR regions.
+
+### Patch Changes
+
+- Updated dependencies [4e9cffc]
+- Updated dependencies [2883c3a]
+- Updated dependencies [e32cb6c]
+- Updated dependencies [081a9d3]
+- Updated dependencies [7d188c5]
+  - @familis/scribe@0.3.0
+
 ## 0.2.1
 
 ### Patch Changes
