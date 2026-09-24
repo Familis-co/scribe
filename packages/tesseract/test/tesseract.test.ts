@@ -358,4 +358,24 @@ describe("Tesseract adapter", () => {
   it("requires an explicit language data path", async () => {
     await expect(createTesseractEngine({ languageDataPath: "" })).rejects.toBeInstanceOf(TypeError);
   });
+
+  it("disables the Tesseract.js cache unless cachePath is set", async () => {
+    const bitmap = { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" } as const;
+    const uncached = await createTesseractEngine({ languageDataPath: "/models" });
+    await uncached.recognize(bitmap, { languages: ["fra"] });
+    const cached = await createTesseractEngine({
+      languageDataPath: "/models",
+      cachePath: "/cache",
+    });
+    await cached.recognize(bitmap, { languages: ["fra"] });
+
+    // Without a cachePath, Tesseract.js would write its cache into the working directory.
+    const [uncachedOptions, cachedOptions] = mocks.createWorker.mock.calls.map((call) => call[2]);
+    expect(uncachedOptions).toMatchObject({ cacheMethod: "none" });
+    expect(uncachedOptions).not.toHaveProperty("cachePath");
+    expect(cachedOptions).toMatchObject({ cachePath: "/cache" });
+    expect(cachedOptions).not.toHaveProperty("cacheMethod");
+    await uncached.close();
+    await cached.close();
+  });
 });

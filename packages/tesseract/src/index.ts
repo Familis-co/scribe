@@ -64,7 +64,14 @@ export interface TesseractEngineOptions {
    * @defaultValue `true`
    */
   readonly compressed?: boolean;
-  /** Writable Tesseract.js cache directory. */
+  /**
+   * Writable directory where Tesseract.js caches the language data it loads.
+   *
+   * @remarks
+   * Omitted, no cache is read or written. Tesseract.js would otherwise write its copy of the
+   * language data into the process's working directory. A local `languageDataPath` gains nothing
+   * from a cache, which only copies one local file to another.
+   */
   readonly cachePath?: string;
   /** Custom Tesseract.js worker script location. */
   readonly workerPath?: string;
@@ -422,7 +429,9 @@ class TesseractEngine implements OcrEngine {
         langPath: this.options.languageDataPath,
         gzip: this.options.compressed ?? true,
         errorHandler: fail,
-        ...(this.options.cachePath ? { cachePath: this.options.cachePath } : {}),
+        ...(this.options.cachePath
+          ? { cachePath: this.options.cachePath }
+          : { cacheMethod: "none" }),
         ...(this.options.workerPath ? { workerPath: this.options.workerPath } : {}),
         ...(this.options.corePath ? { corePath: this.options.corePath } : {}),
         ...(this.options.logger ? { logger: this.options.logger } : {}),
@@ -454,7 +463,6 @@ class TesseractEngine implements OcrEngine {
  * ```ts
  * const ocr = await createTesseractEngine({
  *   languageDataPath: "/opt/tessdata",
- *   cachePath: "/var/cache/scribe",
  *   concurrency: 1,
  * });
  * ```
