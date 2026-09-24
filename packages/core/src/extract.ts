@@ -5,10 +5,12 @@ import type {
   FieldDefinition,
   FieldTree,
   FirstOfDefinition,
+  TableDefinition,
   TextSelector,
   TransformDefinition,
 } from "./profile.js";
-import { isFieldDefinition, isFirstOfDefinition } from "./profile.js";
+import { isFieldDefinition, isFirstOfDefinition, isTableDefinition } from "./profile.js";
+import { layoutTable } from "./table.js";
 import type { BoundingBox, Diagnostic, FieldEvidence, JsonPointer, TextToken } from "./types.js";
 
 /** Page tokens consumed by {@link extractProfile}. */
@@ -718,7 +720,7 @@ export async function extractProfile(
    * @returns The leaf's default value, or `undefined`
    */
   const notFound = (
-    leaf: FieldDefinition | FirstOfDefinition,
+    leaf: FieldDefinition | FirstOfDefinition | TableDefinition,
     pointer: JsonPointer,
     pagesSearched: readonly number[],
     message: string,
@@ -821,14 +823,124 @@ export async function extractProfile(
   };
 
   /**
+   * Extracts a table as rows of transformed cells, with evidence for every cell.
+   *
+   * @remarks
+   * Each selected page is laid out on its own, so a header repeated on every page starts a new set
+   * of rows. A cell whose transform throws becomes `null`; a row missing a required cell is dropped.
+   * Evidence and cell diagnostics use the row's index in the output, after `filter`.
+   *
+   * @param tree - Table definition
+   * @param path - Object keys leading to the leaf
+   * @returns The rows, the default value, or `undefined` when no header is found
+   */
+  const resolveTable = async (tree: TableDefinition, path: readonly string[]): Promise<unknown> => {
+    const pointer = pointerFor(path);
+    const selected = tokensForSelector(tree.selector, pages);
+    const layouts = selected.selections.map((selection) => ({
+      page: selection.page,
+      rows: layoutTable(selection.tokens, tree.columns, tree.rowKey),
+    }));
+    if (layouts.every((layout) => layout.rows === undefined)) {
+      return notFound(
+        tree,
+        pointer,
+        pageNumbers(tree.selector.page, pages),
+        `No table header was found for ${pointer}.`,
+      );
+    }
+
+    const sourceRows = layouts.flatMap(({ page, rows }) =>
+      (rows ?? []).map((cells) => ({ page, cells })),
+    );
+    const rows: Record<string, unknown>[] = [];
+    for (const [sourceIndex, { page, cells }] of sourceRows.entries()) {
+      const missing = tree.columns.filter(
+        (column) => column.required && (cells.get(column.key)?.length ?? 0) === 0,
+      );
+      if (missing.length > 0) {
+        diagnostics.push({
+          level: "warning",
+          code: "TABLE_ROW_DROPPED",
+          message: `Row ${sourceIndex} of ${pointer} was dropped: no value for ${missing.map((column) => column.key).join(", ")}.`,
+          page,
+          path: pointer,
+        });
+        continue;
+      }
+
+      const row: Record<string, unknown> = {};
+      const read: Array<{ key: string; evidence: FieldEvidence; failure?: string }> = [];
+      for (const column of tree.columns) {
+        const tokens = cells.get(column.key) ?? [];
+        if (tokens.length === 0) {
+          row[column.key] = null;
+          continue;
+        }
+        const text = tokens.map((token) => token.text).join(" ");
+        const confidence = lowestConfidence(tokens);
+        const cellEvidence: FieldEvidence = {
+          page,
+          box: unionBoxes(tokens.map((token) => token.box)),
+          text,
+          method: tokens.some((token) => token.source === "ocr") ? "ocr" : "native",
+          ...(confidence === undefined ? {} : { confidence }),
+          transformations: transformNames(column.transforms),
+        };
+        try {
+          row[column.key] = await applyTransforms(text, column.transforms);
+          read.push({ key: column.key, evidence: cellEvidence });
+        } catch (cause) {
+          row[column.key] = null;
+          read.push({
+            key: column.key,
+            evidence: cellEvidence,
+            failure: cause instanceof Error ? cause.message : "A transform failed.",
+          });
+        }
+      }
+      if (tree.filter && !tree.filter(row)) continue;
+
+      const rowPath = [...path, String(rows.length)];
+      rows.push(row);
+      for (const { key, evidence: cellEvidence, failure } of read) {
+        const cellPointer = pointerFor([...rowPath, key]);
+        if (failure !== undefined) {
+          diagnostics.push({
+            level: "warning",
+            code: "TRANSFORM_FAILED",
+            message: failure,
+            page,
+            path: cellPointer,
+          });
+        }
+        accept(
+          {
+            found: true,
+            value: undefined,
+            evidence: [cellEvidence],
+            pages: [page],
+            confidences: [cellEvidence.confidence],
+          },
+          [...rowPath, key],
+          false,
+          tree.warnBelowConfidence,
+        );
+      }
+    }
+    return rows;
+  };
+
+  /**
    * Recursively resolves a field-tree node.
    *
-   * @param tree - Field definition, fallback, or nested object of fields
+   * @param tree - Field definition, fallback, table, or nested object of fields
    * @param path - Object keys leading to this node
    * @returns The resolved value, or `undefined` when a leaf could not be resolved
    */
   const visit = async (tree: FieldTree, path: readonly string[]): Promise<unknown> => {
     if (isFirstOfDefinition(tree)) return resolveFirstOf(tree, path);
+    if (isTableDefinition(tree)) return resolveTable(tree, path);
     if (isFieldDefinition(tree)) {
       const pointer = pointerFor(path);
       let result: FieldResult;

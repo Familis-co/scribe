@@ -10,6 +10,7 @@ import {
   ValidationError,
 } from "./errors.js";
 import { extractProfile, type ExtractPage, type ProfileExtraction } from "./extract.js";
+import { centerY, visualLines } from "./lines.js";
 import type { DocumentProfile, OcrRegion } from "./profile.js";
 import type {
   BinaryInput,
@@ -233,39 +234,14 @@ function toPageToken(token: TextToken, crop: BoundingBox): TextToken {
 }
 
 /**
- * Vertical center of a token.
- *
- * @param token - Token to measure
- * @returns The normalized vertical center
- */
-const centerY = (token: TextToken): number => token.box.y + token.box.height / 2;
-
-/**
  * Rebuilds line indices from token geometry.
- *
- * @remarks
- * Native and OCR line indices come from different numbering schemes, so a merged page groups
- * tokens by position instead: a token joins the current line when its vertical center lies above
- * the line's bottom edge.
  *
  * @param tokens - Tokens of one page from any source
  * @returns The tokens in reading order with geometric line indices
  */
 function relineTokens(tokens: readonly TextToken[]): readonly TextToken[] {
-  const lines: Array<{ bottom: number; tokens: TextToken[] }> = [];
-  for (const token of tokens.toSorted((left, right) => centerY(left) - centerY(right))) {
-    const line = lines.at(-1);
-    if (line && centerY(token) <= line.bottom) {
-      line.tokens.push(token);
-      line.bottom = Math.max(line.bottom, token.box.y + token.box.height);
-    } else {
-      lines.push({ bottom: token.box.y + token.box.height, tokens: [token] });
-    }
-  }
-  return lines.flatMap((line, lineIndex) =>
-    line.tokens
-      .toSorted((left, right) => left.box.x - right.box.x)
-      .map((token) => ({ ...token, lineIndex })),
+  return visualLines(tokens).flatMap((line, lineIndex) =>
+    line.map((token) => ({ ...token, lineIndex })),
   );
 }
 

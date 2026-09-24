@@ -119,8 +119,44 @@ export interface FirstOfDefinition {
   readonly defaultValue?: unknown;
 }
 
+/** Normalized table column produced by {@link field.table}. */
+export interface TableColumnDefinition {
+  /** Output key of the column. */
+  readonly key: string;
+  /** Header label: a literal compared case-insensitively with whole tokens, or a pattern. */
+  readonly label: string | RegExp;
+  /** Transformations applied to each cell of the column. */
+  readonly transforms: readonly TransformDefinition[];
+  /** Whether a row without a value in this column is dropped. */
+  readonly required: boolean;
+}
+
+/** Table field produced by {@link field.table}, extracted as rows of typed columns. */
+export interface TableDefinition {
+  /** Internal field discriminator. */
+  readonly _tag: "Table";
+  /** Selector bounding the table, header included. */
+  readonly selector: TextSelector;
+  /** Columns in output order. */
+  readonly columns: readonly TableColumnDefinition[];
+  /** Key of the column whose tokens start a new row. */
+  readonly rowKey: string;
+  /** Predicate keeping rows after cell transforms. */
+  readonly filter?: (row: Readonly<Record<string, unknown>>) => boolean;
+  /** Whether a missing table header makes extraction fail. */
+  readonly required: boolean;
+  /** OCR confidence threshold applied to every cell. */
+  readonly warnBelowConfidence?: number;
+  /** Value used when no table header is found. */
+  readonly defaultValue?: unknown;
+}
+
 /** Recursive object tree whose leaves are field definitions. */
-export type FieldTree = FieldDefinition | FirstOfDefinition | { readonly [key: string]: FieldTree };
+export type FieldTree =
+  | FieldDefinition
+  | FirstOfDefinition
+  | TableDefinition
+  | { readonly [key: string]: FieldTree };
 
 /** A page area that may be sent to the OCR engine. */
 export interface OcrRegion {
@@ -187,6 +223,36 @@ export interface FirstOfOptions {
   /** Emit a diagnostic when the lowest OCR confidence behind the winning value is below this value. */
   readonly warnBelowConfidence?: number;
   /** Value returned when every alternative fails. */
+  readonly defaultValue?: unknown;
+}
+
+/** One column of a {@link field.table}. */
+export interface TableColumnOptions {
+  /** Output key of the column. */
+  readonly key: string;
+  /** Header label: a literal compared case-insensitively with whole tokens, or a pattern. */
+  readonly label: string | RegExp;
+  /** Transformations applied to each cell of the column. */
+  readonly transforms?: readonly TransformDefinition[];
+  /** Whether a row without a value in this column is dropped. @defaultValue `true` */
+  readonly required?: boolean;
+}
+
+/** Options of {@link field.table}. */
+export interface TableOptions {
+  /** Selector bounding the table, header included. */
+  readonly select: TextSelector;
+  /** Columns in output order. */
+  readonly columns: readonly TableColumnOptions[];
+  /** Key of the column whose tokens start a new row. */
+  readonly rowKey: string;
+  /** Predicate keeping rows after cell transforms. */
+  readonly filter?: (row: Readonly<Record<string, unknown>>) => boolean;
+  /** Whether the table header must be found. @defaultValue `true` */
+  readonly required?: boolean;
+  /** Emit a diagnostic when the lowest OCR confidence behind a cell is below this value. */
+  readonly warnBelowConfidence?: number;
+  /** Value returned when no table header is found. */
   readonly defaultValue?: unknown;
 }
 
@@ -274,6 +340,48 @@ export const field = {
     return {
       _tag: "FirstOf",
       alternatives: [...alternatives],
+      required: options.required ?? true,
+      ...(options.warnBelowConfidence === undefined
+        ? {}
+        : { warnBelowConfidence: options.warnBelowConfidence }),
+      ...(Object.hasOwn(options, "defaultValue") ? { defaultValue: options.defaultValue } : {}),
+    };
+  },
+  /**
+   * Creates a table field extracted as an array of rows keyed by column.
+   *
+   * @remarks
+   * The header is the first line where every column label matches, and column boundaries sit
+   * halfway between adjacent label centers. A row starts at every line with a token in the `rowKey`
+   * column; other lines join the vertically nearest row. A failing cell transform sets the cell to
+   * `null`, and a row missing a required cell is dropped. Both emit a diagnostic.
+   *
+   * @param options - Selection, columns, row key, filter, and requirement options
+   * @returns A table field definition
+   *
+   * @throws `TypeError` when no column is given, a key is repeated, or `rowKey` names no column
+   * @throws `RangeError` when `warnBelowConfidence` is outside `[0, 1]`
+   */
+  table(options: TableOptions): TableDefinition {
+    const keys = options.columns.map((column) => column.key);
+    if (keys.length === 0) throw new TypeError("A table requires at least one column.");
+    if (new Set(keys).size !== keys.length)
+      throw new TypeError("Table column keys must be unique.");
+    if (!keys.includes(options.rowKey)) {
+      throw new TypeError(`rowKey "${options.rowKey}" does not name a table column.`);
+    }
+    assertConfidenceThreshold(options.warnBelowConfidence);
+    return {
+      _tag: "Table",
+      selector: options.select,
+      columns: options.columns.map((column) => ({
+        key: column.key,
+        label: column.label,
+        transforms: column.transforms ?? [],
+        required: column.required ?? true,
+      })),
+      rowKey: options.rowKey,
+      ...(options.filter ? { filter: options.filter } : {}),
       required: options.required ?? true,
       ...(options.warnBelowConfidence === undefined
         ? {}
@@ -519,6 +627,16 @@ export function defineProfile<S extends StandardSchemaV1>(
  */
 export function isFieldDefinition(value: FieldTree): value is FieldDefinition {
   return "_tag" in value && value._tag === "Field";
+}
+
+/**
+ * Determines whether a field-tree node is a {@link field.table} definition.
+ *
+ * @param value - Field-tree node to inspect
+ * @returns `true` for table leaves
+ */
+export function isTableDefinition(value: FieldTree): value is TableDefinition {
+  return "_tag" in value && value._tag === "Table";
 }
 
 /**
