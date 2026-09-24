@@ -56,7 +56,6 @@ const scribe = createScribe({
   pdf: await createPdfiumEngine(),
   ocr: await createTesseractEngine({
     languageDataPath: "/opt/familis/tessdata",
-    cachePath: "/var/cache/familis-scribe",
     concurrency: 1,
   }),
 });
@@ -75,13 +74,18 @@ try {
 | ------------------ | -------- | ---------------------------------------------------------------------------------- |
 | `languageDataPath` | Yes      | Local path or explicitly configured Tesseract.js language-data location.           |
 | `compressed`       | No       | Whether language files are gzipped (`.traineddata.gz`). Defaults to `true`.        |
-| `cachePath`        | No       | Writable Tesseract.js cache directory.                                             |
+| `cachePath`        | No       | Writable directory for the language-data cache. Omitted, no cache is used.         |
 | `workerPath`       | No       | Custom Tesseract.js worker script location.                                        |
 | `corePath`         | No       | Custom Tesseract.js core/WASM location.                                            |
 | `concurrency`      | No       | Number of OCR workers per language set. Defaults to `1`.                           |
 | `logger`           | No       | Receives Tesseract.js progress messages.                                           |
 | `preprocess`       | No       | `{ threshold, sharpen }` image adjustments before recognition. All off by default. |
 | `pageSegMode`      | No       | Tesseract page segmentation mode (`PSM`). Defaults to Tesseract's `PSM.AUTO`.      |
+
+Without `cachePath`, Tesseract.js reads `languageDataPath` directly and writes nothing. Setting it
+makes Tesseract.js keep a copy of each language it loads there and read it back on later starts.
+That only pays off with a remote `languageDataPath`: with a local directory, the cache copies one
+local file to another.
 
 ```ts
 const ocr = await createTesseractEngine({
@@ -209,16 +213,13 @@ start leaves its worker threads idle and keeps Node.js from exiting on its own. 
 ## Container deployment
 
 No system `tesseract-ocr` executable is required. Install dependencies inside the target Linux
-image so Sharp selects the correct platform binary, copy language data into the image, and provide a
-writable cache directory.
+image so Sharp selects the correct platform binary, and copy language data into the image. With
+local language data, leave `cachePath` unset: no writable directory is needed.
 
 ```dockerfile
 ENV TESSDATA_PATH=/opt/familis/tessdata
-ENV SCRIBE_CACHE_PATH=/var/cache/familis-scribe
 
 COPY resources/tessdata/ /opt/familis/tessdata/
-RUN mkdir -p /var/cache/familis-scribe \
-  && chown -R node:node /opt/familis /var/cache/familis-scribe
 ```
 
 Do not copy `node_modules` from macOS or Windows into a Linux image.
