@@ -46,6 +46,44 @@ async function sentPixels(call = 0): Promise<Uint8Array> {
   return new Uint8Array(await sharp(png).extractChannel(0).raw().toBuffer());
 }
 
+/**
+ * Builds a mocked Tesseract.js result holding one line per entry, each word 10 pixels wide.
+ *
+ * @param lines - Words of each line as `[text, confidence]`, confidence from 0 to 100
+ * @param confidence - Page-level confidence from 0 to 100
+ * @returns The value `addJob` resolves with
+ */
+function recognized(lines: readonly (readonly [string, number])[][], confidence = 80) {
+  return {
+    data: {
+      confidence,
+      blocks: [
+        {
+          paragraphs: [
+            {
+              lines: lines.map((words, row) => ({
+                words: words.map(([text, wordConfidence], column) => ({
+                  text,
+                  confidence: wordConfidence,
+                  bbox: { x0: column * 10, y0: row * 10, x1: column * 10 + 10, y1: row * 10 + 10 },
+                })),
+              })),
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/** A blank 100 × 100 grayscale page. */
+const page = {
+  data: new Uint8Array(100 * 100).fill(255),
+  width: 100,
+  height: 100,
+  format: "gray8",
+} as const;
+
 describe("Tesseract adapter", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -353,6 +391,104 @@ describe("Tesseract adapter", () => {
     expect(mocks.setParameters).toHaveBeenCalledWith({ tessedit_pageseg_mode: "6" });
     await automatic.close();
     await block.close();
+  });
+
+  it("keeps every recognized word by default", async () => {
+    mocks.addJob.mockResolvedValue(
+      recognized([
+        [
+          ["q", 12],
+          ["|", 40],
+        ],
+        [["'", 30]],
+      ]),
+    );
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    const result = await engine.recognize(page, { languages: ["eng"] });
+
+    expect(result.tokens.map((token) => token.text)).toEqual(["q", "|", "'"]);
+    expect(result.droppedTokenCount).toBe(0);
+    await engine.close();
+  });
+
+  it("drops words below minWordConfidence and reports how many", async () => {
+    mocks.addJob.mockResolvedValue(
+      recognized(
+        [
+          [
+            ["Facture", 91],
+            ["q", 12],
+            ["2024", 30],
+          ],
+          [["n", 29.9]],
+        ],
+        64,
+      ),
+    );
+    const engine = await createTesseractEngine({
+      languageDataPath: "/models",
+      minWordConfidence: 0.3,
+    });
+    const result = await engine.recognize(page, { languages: ["eng"] });
+
+    expect(result.tokens.map((token) => [token.text, token.confidence])).toEqual([
+      ["Facture", 0.91],
+      ["2024", 0.3],
+    ]);
+    expect(result.tokens[1]).toMatchObject({
+      lineIndex: 0,
+      box: { x: 0.2, y: 0, width: 0.1, height: 0.1 },
+    });
+    expect(result.droppedTokenCount).toBe(2);
+    // The page confidence is Tesseract's own, computed before filtering.
+    expect(result.confidence).toBe(0.64);
+    await engine.close();
+  });
+
+  it("drops punctuation-only words when dropPunctuationOnly is set", async () => {
+    mocks.addJob.mockResolvedValue(
+      recognized([
+        [
+          ["|", 90],
+          ["N°", 90],
+          ["'", 90],
+          ["1/2", 90],
+        ],
+        [
+          ["—", 90],
+          ["l'été", 90],
+          [".", 90],
+          [" ", 90],
+        ],
+      ]),
+    );
+    const engine = await createTesseractEngine({
+      languageDataPath: "/models",
+      dropPunctuationOnly: true,
+    });
+    const result = await engine.recognize(page, { languages: ["fra"] });
+
+    expect(result.tokens.map((token) => [token.text, token.lineIndex])).toEqual([
+      ["N°", 0],
+      ["1/2", 0],
+      ["l'été", 1],
+    ]);
+    expect(result.droppedTokenCount).toBe(5);
+    expect(result.confidence).toBe(0.8);
+    await engine.close();
+  });
+
+  it("rejects a minWordConfidence outside 0 to 1", async () => {
+    for (const minWordConfidence of [-0.1, 1.5, 30, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        createTesseractEngine({ languageDataPath: "/models", minWordConfidence }),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
+    const engine = await createTesseractEngine({
+      languageDataPath: "/models",
+      minWordConfidence: 1,
+    });
+    await engine.close();
   });
 
   it("requires an explicit language data path", async () => {

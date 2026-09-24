@@ -110,6 +110,7 @@ interface MutablePageState {
   ocrSkippedReason?: "blank-page";
   ocrRegionCount?: number;
   ocrImageCount?: number;
+  droppedTokenCount?: number;
 }
 
 /** A declared OCR region resolved on one page. */
@@ -164,6 +165,9 @@ function pageDiagnostics(states: readonly MutablePageState[]): readonly PageDiag
     ...(state.ocrSkippedReason === undefined ? {} : { ocrSkippedReason: state.ocrSkippedReason }),
     ...(state.ocrRegionCount === undefined ? {} : { ocrRegionCount: state.ocrRegionCount }),
     ...(state.ocrImageCount === undefined ? {} : { ocrImageCount: state.ocrImageCount }),
+    ...(state.droppedTokenCount === undefined
+      ? {}
+      : { droppedTokenCount: state.droppedTokenCount }),
   }));
 }
 
@@ -557,6 +561,9 @@ export function createScribe(options: CreateScribeOptions): Scribe {
       state.source = "ocr";
       state.durationMs += performance.now() - started;
       if (result.confidence !== undefined) state.ocrConfidence = result.confidence;
+      if (result.droppedTokenCount !== undefined) {
+        state.droppedTokenCount = result.droppedTokenCount;
+      }
     } catch (cause) {
       if (cause instanceof ScribeError) throw cause;
       throw new OcrError(`OCR failed on page ${state.page.number}.`, { cause });
@@ -660,6 +667,7 @@ export function createScribe(options: CreateScribeOptions): Scribe {
       const confidences: number[] = [];
       let recognizedRegions = 0;
       let recognizedImages = 0;
+      let dropped: number | undefined;
       for (const region of regions) {
         const overlapping = images.filter((image) => intersects(image.box, region.box));
         const inputs: OcrInput[] = [];
@@ -683,6 +691,9 @@ export function createScribe(options: CreateScribeOptions): Scribe {
           if (overlapping.length > 0) recognizedImages += 1;
           tokens.push(...result.tokens.map((token) => toPageToken(token, input.box)));
           if (result.confidence !== undefined) confidences.push(result.confidence);
+          if (result.droppedTokenCount !== undefined) {
+            dropped = (dropped ?? 0) + result.droppedTokenCount;
+          }
         }
         if (recognized) recognizedRegions += 1;
       }
@@ -691,6 +702,7 @@ export function createScribe(options: CreateScribeOptions): Scribe {
       if (merged.ocrCount > 0) state.source = state.nativeTokens.length === 0 ? "ocr" : "mixed";
       state.ocrRegionCount = recognizedRegions;
       state.ocrImageCount = recognizedImages;
+      if (dropped !== undefined) state.droppedTokenCount = dropped;
       if (confidences.length > 0) {
         state.ocrConfidence = confidences.reduce((sum, item) => sum + item, 0) / confidences.length;
       }

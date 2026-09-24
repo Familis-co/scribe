@@ -90,6 +90,31 @@ export interface TesseractEngineOptions {
    * Omitted, the parameter is not set and Tesseract keeps its own default, `PSM.AUTO`.
    */
   readonly pageSegMode?: PSM;
+  /**
+   * Drops recognized words whose confidence is below this value.
+   *
+   * @remarks
+   * A number from `0` to `1`, compared with each word's confidence after it is scaled from
+   * Tesseract's `0`–`100`. The page-level confidence is Tesseract's own and ignores this filter.
+   *
+   * @defaultValue `0`, which keeps every word
+   */
+  readonly minWordConfidence?: number;
+  /**
+   * Drops recognized words that contain no Unicode letter or digit, such as `|`, `'` or `—`.
+   *
+   * @remarks
+   * Words mixing symbols with letters or digits, such as `N°` or `1/2`, are kept.
+   *
+   * @defaultValue `false`
+   */
+  readonly dropPunctuationOnly?: boolean;
+}
+
+/** Word filters applied while Tesseract output is converted into tokens. */
+interface WordFilter {
+  readonly minWordConfidence: number;
+  readonly dropPunctuationOnly: boolean;
 }
 
 /** Initialized workers dedicated to one normalized language set. */
@@ -182,25 +207,41 @@ async function assertLanguageData(
 }
 
 /**
- * Converts Tesseract word boxes into normalized OCR tokens.
+ * Converts Tesseract word boxes into normalized OCR tokens, discarding filtered words.
+ *
+ * @remarks
+ * Line indices still advance for a line whose words were all dropped, so they stay one per
+ * Tesseract line.
  *
  * @param blocks - Tesseract layout blocks, or `null` when no layout was produced
  * @param width - Source bitmap width in pixels
  * @param height - Source bitmap height in pixels
- * @returns Word tokens in reading order with one line index per Tesseract line
+ * @param filter - Word filters to apply
+ * @returns Word tokens in reading order with one line index per Tesseract line, and the number of
+ * words dropped
  */
 function normalizedTokens(
   blocks: Tesseract.Block[] | null,
   width: number,
   height: number,
-): readonly TextToken[] {
-  if (!blocks) return [];
+  filter: WordFilter,
+): { readonly tokens: readonly TextToken[]; readonly dropped: number } {
+  if (!blocks) return { tokens: [], dropped: 0 };
   const tokens: TextToken[] = [];
+  let dropped = 0;
   let lineIndex = 0;
   for (const block of blocks) {
     for (const paragraph of block.paragraphs) {
       for (const line of paragraph.lines) {
         for (const word of line.words) {
+          const confidence = Math.min(1, Math.max(0, word.confidence / 100));
+          if (
+            confidence < filter.minWordConfidence ||
+            (filter.dropPunctuationOnly && !/[\p{L}\p{N}]/u.test(word.text))
+          ) {
+            dropped += 1;
+            continue;
+          }
           const { x0, y0, x1, y1 } = word.bbox;
           tokens.push({
             text: word.text,
@@ -211,7 +252,7 @@ function normalizedTokens(
               height: Math.min(1, Math.max(0, (y1 - y0) / height)),
             },
             source: "ocr",
-            confidence: Math.min(1, Math.max(0, word.confidence / 100)),
+            confidence,
             lineIndex,
           });
         }
@@ -219,7 +260,7 @@ function normalizedTokens(
       }
     }
   }
-  return tokens;
+  return { tokens, dropped };
 }
 
 /**
@@ -290,9 +331,19 @@ class TesseractEngine implements OcrEngine {
         ),
         options.signal,
       );
+      const { tokens, dropped } = normalizedTokens(
+        result.data.blocks,
+        bitmap.width,
+        bitmap.height,
+        {
+          minWordConfidence: this.options.minWordConfidence ?? 0,
+          dropPunctuationOnly: this.options.dropPunctuationOnly ?? false,
+        },
+      );
       return {
-        tokens: normalizedTokens(result.data.blocks, bitmap.width, bitmap.height),
+        tokens,
         confidence: Math.min(1, Math.max(0, result.data.confidence / 100)),
+        droppedTokenCount: dropped,
       };
     } catch (cause) {
       if (cause instanceof AbortError) throw cause;
@@ -452,8 +503,8 @@ class TesseractEngine implements OcrEngine {
  * @returns An OCR engine that initializes worker pools lazily per language set
  *
  * @throws `TypeError` when `languageDataPath` is empty
- * @throws `RangeError` when concurrency is not a positive integer, or `preprocess.threshold` is not
- * an integer from 0 to 255
+ * @throws `RangeError` when concurrency is not a positive integer, `preprocess.threshold` is not an
+ * integer from 0 to 255, or `minWordConfidence` is not a number from 0 to 1
  *
  * @remarks
  * The returned engine accepts rendered bitmaps, not PDF files. Call {@link OcrEngine.close} during
@@ -482,6 +533,13 @@ export async function createTesseractEngine(options: TesseractEngineOptions): Pr
   const threshold = options.preprocess?.threshold;
   if (threshold != null && (!Number.isInteger(threshold) || threshold < 0 || threshold > 255)) {
     throw new RangeError("preprocess.threshold must be an integer from 0 to 255.");
+  }
+  const minWordConfidence = options.minWordConfidence;
+  if (
+    minWordConfidence !== undefined &&
+    (!Number.isFinite(minWordConfidence) || minWordConfidence < 0 || minWordConfidence > 1)
+  ) {
+    throw new RangeError("minWordConfidence must be a number from 0 to 1.");
   }
   return new TesseractEngine({ ...options, concurrency });
 }
