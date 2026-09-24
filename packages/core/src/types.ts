@@ -227,8 +227,8 @@ export interface Diagnostic {
 export interface PageDiagnostic {
   /** One-based page number. */
   readonly page: number;
-  /** Final text source used for the page. */
-  readonly source: TextSource;
+  /** Final text source used for the page. `mixed` merges native text with OCR'd regions. */
+  readonly source: TextSource | "mixed";
   /** Number of native alphanumeric characters detected before OCR. */
   readonly nativeCharacterCount: number;
   /** Number of final positioned tokens. */
@@ -239,6 +239,8 @@ export interface PageDiagnostic {
   readonly ocrConfidence?: number;
   /** Reason recognition was skipped after rendering. */
   readonly ocrSkippedReason?: "blank-page";
+  /** Number of declared OCR regions recognized on the page, when the profile declares regions. */
+  readonly ocrRegionCount?: number;
 }
 
 /**

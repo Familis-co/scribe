@@ -122,6 +122,26 @@ export interface FirstOfDefinition {
 /** Recursive object tree whose leaves are field definitions. */
 export type FieldTree = FieldDefinition | FirstOfDefinition | { readonly [key: string]: FieldTree };
 
+/** A page area that may be sent to the OCR engine. */
+export interface OcrRegion {
+  /** Page the region belongs to. `"any"` declares it on every page. */
+  readonly page: PageSelector;
+  /** Normalized rectangle with a top-left origin. */
+  readonly box: BoundingBox;
+}
+
+/** OCR options declared by a profile. */
+export interface ProfileOcrOptions {
+  /**
+   * The only page areas ever sent to the OCR engine.
+   *
+   * @remarks
+   * When set, OCR crops these regions out of the page render and merges the recognized tokens with
+   * the native text layer instead of replacing it. Pages without a region are never OCR'd.
+   */
+  readonly regions?: readonly OcrRegion[];
+}
+
 /**
  * Declarative extraction profile coupled to a Standard Schema output validator.
  *
@@ -138,6 +158,8 @@ export interface DocumentProfile<S extends StandardSchemaV1 = StandardSchemaV1> 
   readonly schema: S;
   /** Field tree matching the intended result structure. */
   readonly fields: FieldTree;
+  /** OCR options. Without `regions`, OCR recognizes and replaces whole pages. */
+  readonly ocr?: ProfileOcrOptions;
 }
 
 /** Options shared by scalar and repeated field builders. */
@@ -453,7 +475,8 @@ export const transform = {
  * @param profile - Profile definition
  * @returns The same profile with preserved type inference
  *
- * @throws `TypeError` when no non-empty OCR language is declared
+ * @throws `TypeError` when no non-empty OCR language is declared, or `ocr.regions` is empty
+ * @throws `RangeError` when an OCR region has an invalid page or a box outside the page
  */
 export function defineProfile<S extends StandardSchemaV1>(
   profile: DocumentProfile<S>,
@@ -463,6 +486,27 @@ export function defineProfile<S extends StandardSchemaV1>(
     profile.languages.some((language) => language.trim() === "")
   ) {
     throw new TypeError("A profile must declare at least one non-empty OCR language.");
+  }
+  const regions = profile.ocr?.regions;
+  if (regions?.length === 0) {
+    throw new TypeError("ocr.regions must declare at least one region; omit it for whole pages.");
+  }
+  for (const region of regions ?? []) {
+    if (typeof region.page === "number" && (!Number.isInteger(region.page) || region.page < 1)) {
+      throw new RangeError("An OCR region page must be a positive integer.");
+    }
+    const { x, y, width, height } = region.box;
+    if (
+      ![x, y, width, height].every(Number.isFinite) ||
+      x < 0 ||
+      y < 0 ||
+      width <= 0 ||
+      height <= 0 ||
+      x + width > 1 + Number.EPSILON * 4 ||
+      y + height > 1 + Number.EPSILON * 4
+    ) {
+      throw new RangeError("An OCR region box must be a non-empty rectangle inside the page.");
+    }
   }
   return profile;
 }
