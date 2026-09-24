@@ -157,6 +157,49 @@ line (`Reference: 1234567  Concerne: …`) is left out. Unlike a fixed offset bo
 start of the next line when OCR boxes shift vertically. `page` and `occurrence` behave as in
 `relativeToAnchor`, and literal `text` and `stopAt` values ignore case unless `caseSensitive` is set.
 
+Select the value printed under a label:
+
+```ts
+select.belowAnchor({
+  text: "Adresse de livraison",
+  maxLines: 2, // default 1
+  maxDistance: 0.03, // default: twice the anchor's height
+});
+```
+
+`belowAnchor` reads the visual lines under the anchor, within its column. The column ends at the next
+token on the anchor's line (or the page's right edge) and starts at the anchor's left edge when
+another token precedes it on its line (or the page's left edge otherwise), so two labels printed side
+by side each read only the value under themselves. The first line is selected when its top lies
+within `maxDistance` of the anchor's bottom, and each further line, up to `maxLines`, when it lies
+within `maxDistance` of the previous one.
+
+#### Fuzzy anchors
+
+OCR often damages a label by a character or two (`Cossier N°:` for `Dossier N°:`). Set `fuzzy` on
+`relativeToAnchor`, `afterAnchor` or `belowAnchor` to accept a close match:
+
+```ts
+select.afterAnchor({ text: "Dossier N°:", stopAt: "Concerne:", fuzzy: 0.7 });
+```
+
+- The label and each candidate are NFKD-normalized, stripped of diacritics, punctuation and
+  whitespace, and lowercased unless `caseSensitive` is set. Their similarity is
+  `1 − levenshtein(a, b) / max(|a|, |b|)`, so `Cossier N°:` scores `0.875` against `Dossier N°:` and
+  `Conceme:` scores `0.75` against `Concerne:`.
+- Candidates are every run of 1 to 5 consecutive tokens on a line that starts and ends on a token
+  with a letter or digit. Each line's best run at or above `fuzzy` is its match, extended over the
+  punctuation-only tokens right after it, so a detached `:` is not read as the value.
+- Matches are ranked by score. Ties go to the leftmost match, then to the top one, and `occurrence`
+  indexes that ranking.
+- With `afterAnchor`, `stopAt` is matched the same way.
+- Only literal labels are fuzzy. A `RegExp` anchor or `stopAt` stays exact, and so does a literal
+  without any letter or digit.
+- Evidence records the matched label and its score as `anchor: { text, score }`, so every fuzzy match
+  is auditable.
+
+Without `fuzzy`, anchors match exactly.
+
 ### Fields and captures
 
 `field.text` returns a single value. `field.list` applies a repeated capture and returns an array.
@@ -370,7 +413,8 @@ interface ExtractionResult<T> {
 ```
 
 Evidence keys are JSON pointers such as `/customer/name`. Each item reports the page, bounding box,
-raw text, `native` or `ocr` method, optional confidence, and transformations applied.
+raw text, `native` or `ocr` method, optional confidence, and transformations applied. When a
+fuzzy anchor located the value, `anchor` holds the label it matched and its score.
 
 Page diagnostics report the final text source (`native`, `ocr` or `mixed`), native character
 counts, final token counts, timing, OCR confidence, the number of OCR regions recognized, and

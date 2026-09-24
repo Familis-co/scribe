@@ -28,6 +28,8 @@ export interface AnchorSelector {
   readonly occurrence: number;
   /** Whether literal anchor matching preserves case. */
   readonly caseSensitive: boolean;
+  /** Minimum similarity for a fuzzy literal anchor match. Omitted, literals match exactly. */
+  readonly fuzzy?: number;
 }
 
 /** Selects the tokens following a text anchor on the same visual line. */
@@ -44,10 +46,39 @@ export interface AfterAnchorSelector {
   readonly occurrence: number;
   /** Whether literal anchor and `stopAt` matching preserves case. */
   readonly caseSensitive: boolean;
+  /** Minimum similarity for fuzzy literal anchor and `stopAt` matches. Omitted, literals match exactly. */
+  readonly fuzzy?: number;
+}
+
+/** Selects the visual lines below a text anchor, within the anchor's column. */
+export interface BelowAnchorSelector {
+  /** Selector discriminator. */
+  readonly kind: "belowAnchor";
+  /** Pages eligible for anchor matching. */
+  readonly page: PageSelector;
+  /** Literal or regular-expression anchor. */
+  readonly text: string | RegExp;
+  /** Zero-based matching anchor occurrence. */
+  readonly occurrence: number;
+  /** Whether literal anchor matching preserves case. */
+  readonly caseSensitive: boolean;
+  /** Minimum similarity for a fuzzy literal anchor match. Omitted, literals match exactly. */
+  readonly fuzzy?: number;
+  /** Number of lines selected below the anchor. */
+  readonly maxLines: number;
+  /**
+   * Largest vertical gap, normalized to the page height, between the anchor and the first line and
+   * between consecutive lines. Omitted, twice the anchor's height.
+   */
+  readonly maxDistance?: number;
 }
 
 /** Selector supported by declarative fields. */
-export type TextSelector = RegionSelector | AnchorSelector | AfterAnchorSelector;
+export type TextSelector =
+  | RegionSelector
+  | AnchorSelector
+  | AfterAnchorSelector
+  | BelowAnchorSelector;
 
 /** Declarative transformation applied after regex capture. */
 export type TransformDefinition =
@@ -269,6 +300,21 @@ function assertConfidenceThreshold(threshold: number | undefined): void {
 }
 
 /**
+ * Validates an optional fuzzy anchor threshold.
+ *
+ * @param fuzzy - Minimum similarity to validate
+ * @returns The threshold as a spreadable property, empty when omitted
+ * @throws `RangeError` when the threshold is outside `(0, 1]`
+ */
+function fuzzyOption(fuzzy: number | undefined): { readonly fuzzy?: number } {
+  if (fuzzy === undefined) return {};
+  if (!Number.isFinite(fuzzy) || fuzzy <= 0 || fuzzy > 1) {
+    throw new RangeError("fuzzy must be greater than 0 and at most 1.");
+  }
+  return { fuzzy };
+}
+
+/**
  * Validates builder options and produces a normalized field definition.
  *
  * @param options - Selection, capture, transformation, and requirement options
@@ -408,6 +454,8 @@ export const select = {
    *
    * @param options - Anchor matching and offset options
    * @returns An anchor-relative selector
+   *
+   * @throws `RangeError` when `fuzzy` is not above `0` and at most `1`
    */
   relativeToAnchor(options: {
     /** Literal or regular-expression anchor, matched line by line. */
@@ -420,6 +468,8 @@ export const select = {
     readonly occurrence?: number;
     /** Whether literal anchor matching preserves case. @defaultValue `false` */
     readonly caseSensitive?: boolean;
+    /** Minimum similarity, above `0` and at most `1`, for a fuzzy literal anchor match. */
+    readonly fuzzy?: number;
   }): AnchorSelector {
     return {
       kind: "anchor",
@@ -428,6 +478,7 @@ export const select = {
       page: options.page ?? "any",
       occurrence: options.occurrence ?? 0,
       caseSensitive: options.caseSensitive ?? false,
+      ...fuzzyOption(options.fuzzy),
     };
   },
   /**
@@ -439,6 +490,8 @@ export const select = {
    *
    * @param options - Anchor matching and stop options
    * @returns A line-scoped anchor selector
+   *
+   * @throws `RangeError` when `fuzzy` is not above `0` and at most `1`
    */
   afterAnchor(options: {
     /** Literal or regular-expression anchor, matched line by line. */
@@ -451,6 +504,8 @@ export const select = {
     readonly occurrence?: number;
     /** Whether literal anchor and `stopAt` matching preserves case. @defaultValue `false` */
     readonly caseSensitive?: boolean;
+    /** Minimum similarity, above `0` and at most `1`, for fuzzy literal anchor and `stopAt` matches. */
+    readonly fuzzy?: number;
   }): AfterAnchorSelector {
     return {
       kind: "afterAnchor",
@@ -459,6 +514,61 @@ export const select = {
       page: options.page ?? "any",
       occurrence: options.occurrence ?? 0,
       caseSensitive: options.caseSensitive ?? false,
+      ...fuzzyOption(options.fuzzy),
+    };
+  },
+  /**
+   * Selects the visual lines printed below a text anchor, for labels written above their value.
+   *
+   * @remarks
+   * The anchor's column bounds the selection, so a label sitting beside another one only reads the
+   * value under itself. It ends at the next token on the anchor's line, or at the page's right edge,
+   * and starts at the anchor's left edge when a token precedes the anchor on its line, or at the
+   * page's left edge otherwise. A token belongs to the column when its center does. The first
+   * line below the anchor in that column is selected when it starts within `maxDistance`, and each
+   * further line up to `maxLines` when it starts within `maxDistance` of the previous one.
+   *
+   * @param options - Anchor matching, line count, and distance options
+   * @returns A below-anchor selector
+   *
+   * @throws `RangeError` when `fuzzy` is not above `0` and at most `1`, `maxLines` is not a positive
+   * integer, or `maxDistance` is negative
+   */
+  belowAnchor(options: {
+    /** Literal or regular-expression anchor, matched line by line. */
+    readonly text: string | RegExp;
+    /** Pages eligible for anchor matching. @defaultValue `"any"` */
+    readonly page?: PageSelector;
+    /** Zero-based matching anchor occurrence. @defaultValue `0` */
+    readonly occurrence?: number;
+    /** Whether literal anchor matching preserves case. @defaultValue `false` */
+    readonly caseSensitive?: boolean;
+    /** Minimum similarity, above `0` and at most `1`, for a fuzzy literal anchor match. */
+    readonly fuzzy?: number;
+    /** Number of lines selected below the anchor. @defaultValue `1` */
+    readonly maxLines?: number;
+    /** Largest normalized vertical gap before a line. @defaultValue twice the anchor's height */
+    readonly maxDistance?: number;
+  }): BelowAnchorSelector {
+    const maxLines = options.maxLines ?? 1;
+    if (!Number.isInteger(maxLines) || maxLines < 1) {
+      throw new RangeError("belowAnchor maxLines must be a positive integer.");
+    }
+    if (
+      options.maxDistance !== undefined &&
+      (!Number.isFinite(options.maxDistance) || options.maxDistance < 0)
+    ) {
+      throw new RangeError("belowAnchor maxDistance must be a non-negative number.");
+    }
+    return {
+      kind: "belowAnchor",
+      text: options.text,
+      page: options.page ?? "any",
+      occurrence: options.occurrence ?? 0,
+      caseSensitive: options.caseSensitive ?? false,
+      ...fuzzyOption(options.fuzzy),
+      maxLines,
+      ...(options.maxDistance === undefined ? {} : { maxDistance: options.maxDistance }),
     };
   },
 };
