@@ -110,6 +110,13 @@ function unionBoxes(boxes: readonly BoundingBox[]): BoundingBox {
   return { x, y, width: right - x, height: bottom - y };
 }
 
+/** Grayscale pixels decoded from an image object, one byte per pixel. */
+interface GrayPixels {
+  readonly data: Uint8Array;
+  readonly width: number;
+  readonly height: number;
+}
+
 /** A straight segment in page space, in PDF points with a bottom-left origin. */
 interface Segment {
   readonly x0: number;
@@ -514,7 +521,7 @@ class PdfiumPage implements PdfPage {
             width: clamp((right - left) / this.width),
             height: clamp((top - bottom) / this.height),
           },
-          bitmap: { ...bitmap, dpi: (bitmap.width * 72) / (right - left) },
+          bitmap: { ...bitmap, format: "gray8", dpi: (bitmap.width * 72) / (right - left) },
         });
       }
     } finally {
@@ -529,7 +536,7 @@ class PdfiumPage implements PdfPage {
    * @param object - Native `FPDF_PAGEOBJECT` image handle
    * @returns The grayscale pixels, or `undefined` when PDFium cannot decode the image
    */
-  #imageBitmap(object: number): PageBitmap | undefined {
+  #imageBitmap(object: number): GrayPixels | undefined {
     const bitmap = this.module.FPDFImageObj_GetBitmap(object);
     if (!bitmap) return undefined;
     try {
@@ -558,7 +565,7 @@ class PdfiumPage implements PdfPage {
           gray[y * width + x] = Math.round(255 - (255 - luminance) * alpha);
         }
       }
-      return { data: gray, width, height, format: "gray8" };
+      return { data: gray, width, height };
     } finally {
       this.module.FPDFBitmap_Destroy(bitmap);
     }
