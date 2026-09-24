@@ -79,7 +79,6 @@ const scribe = createScribe({
   pdf: await createPdfiumEngine(),
   ocr: await createTesseractEngine({
     languageDataPath: "/opt/tessdata",
-    cachePath: "/var/cache/scribe",
   }),
 });
 
