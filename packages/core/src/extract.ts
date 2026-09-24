@@ -4,10 +4,11 @@ import type {
   DocumentProfile,
   FieldDefinition,
   FieldTree,
+  FirstOfDefinition,
   TextSelector,
   TransformDefinition,
 } from "./profile.js";
-import { isFieldDefinition } from "./profile.js";
+import { isFieldDefinition, isFirstOfDefinition } from "./profile.js";
 import type { BoundingBox, Diagnostic, FieldEvidence, JsonPointer, TextToken } from "./types.js";
 
 /** Page tokens consumed by {@link extractProfile}. */
@@ -638,6 +639,9 @@ function transformNames(transforms: readonly TransformDefinition[]): readonly st
 /**
  * Resolves one field definition against the extraction pages.
  *
+ * @remarks
+ * The field's `defaultValue` is not applied here, so a fallback can tell a miss from a default.
+ *
  * @param field - Field to resolve
  * @param pages - Pages available for extraction
  * @returns The transformed value with its evidence, or `found: false` with the searched pages
@@ -652,15 +656,6 @@ async function extractField(
   const captured = captureValues(layout.text, field);
 
   if (captured.length === 0) {
-    if (Object.hasOwn(field, "defaultValue")) {
-      return {
-        found: true,
-        value: field.defaultValue,
-        evidence: [],
-        pages: selected.pages,
-        confidences: [],
-      };
-    }
     return {
       found: false,
       evidence: [],
@@ -714,42 +709,131 @@ export async function extractProfile(
   const implicatedPages = new Set<number>();
 
   /**
+   * Records a leaf that found no value, unless it has a default.
+   *
+   * @param leaf - Field or fallback definition carrying `required` and `defaultValue`
+   * @param pointer - JSON Pointer of the leaf
+   * @param pagesSearched - Pages to target with the OCR fallback
+   * @param message - Diagnostic message
+   * @returns The leaf's default value, or `undefined`
+   */
+  const notFound = (
+    leaf: FieldDefinition | FirstOfDefinition,
+    pointer: JsonPointer,
+    pagesSearched: readonly number[],
+    message: string,
+  ): unknown => {
+    if (Object.hasOwn(leaf, "defaultValue")) return leaf.defaultValue;
+    if (leaf.required) missingRequired.push(pointer);
+    pagesSearched.forEach((page) => implicatedPages.add(page));
+    diagnostics.push({
+      level: leaf.required ? "warning" : "info",
+      code: "FIELD_NOT_FOUND",
+      message,
+      path: pointer,
+    });
+    return undefined;
+  };
+
+  /**
+   * Records the evidence of a resolved leaf and warns about low-confidence values.
+   *
+   * @param result - Resolved field result
+   * @param path - Object keys leading to the leaf
+   * @param many - Whether the value is a list, whose items are scored separately
+   * @param threshold - Optional confidence threshold
+   * @param extra - Properties added to every evidence entry
+   * @returns The resolved value
+   */
+  const accept = (
+    result: FieldResult,
+    path: readonly string[],
+    many: boolean,
+    threshold: number | undefined,
+    extra: Partial<FieldEvidence> = {},
+  ): unknown => {
+    const pointer = pointerFor(path);
+    if (result.evidence.length > 0) {
+      evidence[pointer] = result.evidence.map((item) => ({ ...item, ...extra }));
+    }
+    result.confidences.forEach((confidence, index) => {
+      if (threshold === undefined || confidence === undefined || confidence >= threshold) return;
+      const valuePointer = many ? pointerFor([...path, String(index)]) : pointer;
+      diagnostics.push({
+        level: "warning",
+        code: "LOW_FIELD_CONFIDENCE",
+        message: `OCR confidence for ${valuePointer} is ${confidence.toFixed(3)}, below ${threshold.toFixed(3)}.`,
+        path: valuePointer,
+      });
+    });
+    return result.value;
+  };
+
+  /**
+   * Tries each alternative of a fallback in order and keeps the first that resolves.
+   *
+   * @param tree - Fallback definition
+   * @param path - Object keys leading to the leaf
+   * @returns The winning value, the default value, or `undefined`
+   */
+  const resolveFirstOf = async (
+    tree: FirstOfDefinition,
+    path: readonly string[],
+  ): Promise<unknown> => {
+    const pointer = pointerFor(path);
+    const failures: string[] = [];
+    const searched = new Set<number>();
+    for (const [index, alternative] of tree.alternatives.entries()) {
+      let result: FieldResult;
+      try {
+        result = await extractField(alternative, pages);
+      } catch (cause) {
+        failures.push(
+          `alternative ${index} was rejected (${cause instanceof Error ? cause.message : String(cause)})`,
+        );
+        // A rejected reading may be an OCR misread, so its pages stay eligible for the OCR retry.
+        pageNumbers(alternative.selector.page, pages).forEach((page) => searched.add(page));
+        continue;
+      }
+      if (!result.found) {
+        failures.push(`alternative ${index} found nothing`);
+        result.pages.forEach((page) => searched.add(page));
+        continue;
+      }
+      if (index > 0) {
+        diagnostics.push({
+          level: "info",
+          code: "FALLBACK_USED",
+          message: `Alternative ${index} was used for ${pointer}: ${failures.join("; ")}.`,
+          path: pointer,
+        });
+      }
+      return accept(result, path, alternative.many, tree.warnBelowConfidence, {
+        alternative: index,
+      });
+    }
+    return notFound(
+      tree,
+      pointer,
+      [...searched],
+      `No value was found for ${pointer}: ${failures.join("; ")}.`,
+    );
+  };
+
+  /**
    * Recursively resolves a field-tree node.
    *
-   * @param tree - Field definition or nested object of fields
+   * @param tree - Field definition, fallback, or nested object of fields
    * @param path - Object keys leading to this node
    * @returns The resolved value, or `undefined` when a leaf could not be resolved
    */
   const visit = async (tree: FieldTree, path: readonly string[]): Promise<unknown> => {
+    if (isFirstOfDefinition(tree)) return resolveFirstOf(tree, path);
     if (isFieldDefinition(tree)) {
       const pointer = pointerFor(path);
+      let result: FieldResult;
       try {
-        const result = await extractField(tree, pages);
-        if (!result.found) {
-          if (tree.required) missingRequired.push(pointer);
-          result.pages.forEach((page) => implicatedPages.add(page));
-          diagnostics.push({
-            level: tree.required ? "warning" : "info",
-            code: "FIELD_NOT_FOUND",
-            message: `No value was found for ${pointer}.`,
-            path: pointer,
-          });
-          return undefined;
-        }
-        if (result.evidence.length > 0) evidence[pointer] = result.evidence;
-        const threshold = tree.warnBelowConfidence;
-        result.confidences.forEach((confidence, index) => {
-          if (threshold === undefined || confidence === undefined || confidence >= threshold)
-            return;
-          const valuePointer = tree.many ? pointerFor([...path, String(index)]) : pointer;
-          diagnostics.push({
-            level: "warning",
-            code: "LOW_FIELD_CONFIDENCE",
-            message: `OCR confidence for ${valuePointer} is ${confidence.toFixed(3)}, below ${threshold.toFixed(3)}.`,
-            path: valuePointer,
-          });
-        });
-        return result.value;
+        result = await extractField(tree, pages);
       } catch (cause) {
         if (tree.required) missingRequired.push(pointer);
         diagnostics.push({
@@ -760,6 +844,10 @@ export async function extractProfile(
         });
         return undefined;
       }
+      if (!result.found) {
+        return notFound(tree, pointer, result.pages, `No value was found for ${pointer}.`);
+      }
+      return accept(result, path, tree.many, tree.warnBelowConfidence);
     }
 
     const result: Record<string, unknown> = {};

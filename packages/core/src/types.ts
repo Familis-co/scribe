@@ -205,6 +205,8 @@ export interface FieldEvidence {
   readonly confidence?: number;
   /** Ordered names of transformations applied to the captured value. */
   readonly transformations: readonly string[];
+  /** Zero-based index of the `field.firstOf` alternative that produced the value. */
+  readonly alternative?: number;
 }
 
 /** Non-fatal information or warning produced during extraction. */

@@ -105,8 +105,22 @@ export interface FieldDefinition {
   readonly defaultValue?: unknown;
 }
 
+/** Ordered fallback between field definitions, produced by {@link field.firstOf}. */
+export interface FirstOfDefinition {
+  /** Internal field discriminator. */
+  readonly _tag: "FirstOf";
+  /** Strategies tried in order. Their own `required`, `defaultValue` and `warnBelowConfidence` are ignored. */
+  readonly alternatives: readonly FieldDefinition[];
+  /** Whether failure of every alternative makes extraction fail. */
+  readonly required: boolean;
+  /** OCR confidence threshold applied to the winning alternative's value. */
+  readonly warnBelowConfidence?: number;
+  /** Value used when every alternative fails. */
+  readonly defaultValue?: unknown;
+}
+
 /** Recursive object tree whose leaves are field definitions. */
-export type FieldTree = FieldDefinition | { readonly [key: string]: FieldTree };
+export type FieldTree = FieldDefinition | FirstOfDefinition | { readonly [key: string]: FieldTree };
 
 /**
  * Declarative extraction profile coupled to a Standard Schema output validator.
@@ -144,6 +158,28 @@ export interface FieldOptions {
   readonly defaultValue?: unknown;
 }
 
+/** Options of the {@link field.firstOf} wrapper. */
+export interface FirstOfOptions {
+  /** Whether one alternative must resolve. @defaultValue `true` */
+  readonly required?: boolean;
+  /** Emit a diagnostic when the lowest OCR confidence behind the winning value is below this value. */
+  readonly warnBelowConfidence?: number;
+  /** Value returned when every alternative fails. */
+  readonly defaultValue?: unknown;
+}
+
+/**
+ * Validates an optional confidence threshold.
+ *
+ * @param threshold - Threshold to validate
+ * @throws `RangeError` when the threshold is outside `[0, 1]`
+ */
+function assertConfidenceThreshold(threshold: number | undefined): void {
+  if (threshold !== undefined && (!Number.isFinite(threshold) || threshold < 0 || threshold > 1)) {
+    throw new RangeError("warnBelowConfidence must be between 0 and 1.");
+  }
+}
+
 /**
  * Validates builder options and produces a normalized field definition.
  *
@@ -153,14 +189,7 @@ export interface FieldOptions {
  * @throws `RangeError` when `warnBelowConfidence` is outside `[0, 1]`
  */
 function makeField(options: FieldOptions, many: boolean): FieldDefinition {
-  if (
-    options.warnBelowConfidence !== undefined &&
-    (!Number.isFinite(options.warnBelowConfidence) ||
-      options.warnBelowConfidence < 0 ||
-      options.warnBelowConfidence > 1)
-  ) {
-    throw new RangeError("warnBelowConfidence must be between 0 and 1.");
-  }
+  assertConfidenceThreshold(options.warnBelowConfidence);
   const capture = options.pattern
     ? { pattern: options.pattern, group: options.group ?? 0 }
     : undefined;
@@ -197,6 +226,38 @@ export const field = {
    */
   list(options: FieldOptions): FieldDefinition {
     return makeField(options, true);
+  },
+  /**
+   * Creates an ordered fallback between extraction strategies.
+   *
+   * @remarks
+   * Alternatives are tried in order. The first one that captures a value and whose transforms all
+   * succeed wins, so a throwing transform rejects a reading and moves on to the next alternative.
+   *
+   * @param alternatives - Field definitions tried in order
+   * @param options - Requirement, default, and confidence options for the whole field
+   * @returns A fallback field definition
+   *
+   * @throws `TypeError` when no alternative is given
+   * @throws `RangeError` when `warnBelowConfidence` is outside `[0, 1]`
+   */
+  firstOf(
+    alternatives: readonly FieldDefinition[],
+    options: FirstOfOptions = {},
+  ): FirstOfDefinition {
+    if (alternatives.length === 0) {
+      throw new TypeError("firstOf requires at least one alternative.");
+    }
+    assertConfidenceThreshold(options.warnBelowConfidence);
+    return {
+      _tag: "FirstOf",
+      alternatives: [...alternatives],
+      required: options.required ?? true,
+      ...(options.warnBelowConfidence === undefined
+        ? {}
+        : { warnBelowConfidence: options.warnBelowConfidence }),
+      ...(Object.hasOwn(options, "defaultValue") ? { defaultValue: options.defaultValue } : {}),
+    };
   },
 };
 
@@ -414,4 +475,14 @@ export function defineProfile<S extends StandardSchemaV1>(
  */
 export function isFieldDefinition(value: FieldTree): value is FieldDefinition {
   return "_tag" in value && value._tag === "Field";
+}
+
+/**
+ * Determines whether a field-tree node is a {@link field.firstOf} fallback.
+ *
+ * @param value - Field-tree node to inspect
+ * @returns `true` for fallback leaves
+ */
+export function isFirstOfDefinition(value: FieldTree): value is FirstOfDefinition {
+  return "_tag" in value && value._tag === "FirstOf";
 }
