@@ -30,8 +30,24 @@ export interface AnchorSelector {
   readonly caseSensitive: boolean;
 }
 
+/** Selects the tokens following a text anchor on the same visual line. */
+export interface AfterAnchorSelector {
+  /** Selector discriminator. */
+  readonly kind: "afterAnchor";
+  /** Pages eligible for anchor matching. */
+  readonly page: PageSelector;
+  /** Literal or regular-expression anchor. */
+  readonly text: string | RegExp;
+  /** Literal or regular-expression text before which the selection stops. */
+  readonly stopAt?: string | RegExp;
+  /** Zero-based matching anchor occurrence. */
+  readonly occurrence: number;
+  /** Whether literal anchor and `stopAt` matching preserves case. */
+  readonly caseSensitive: boolean;
+}
+
 /** Selector supported by declarative fields. */
-export type TextSelector = RegionSelector | AnchorSelector;
+export type TextSelector = RegionSelector | AnchorSelector | AfterAnchorSelector;
 
 /** Declarative transformation applied after regex capture. */
 export type TransformDefinition =
@@ -218,6 +234,37 @@ export const select = {
       kind: "anchor",
       text: options.text,
       offset: options.offset,
+      page: options.page ?? "any",
+      occurrence: options.occurrence ?? 0,
+      caseSensitive: options.caseSensitive ?? false,
+    };
+  },
+  /**
+   * Selects the tokens to the right of a text anchor on the same visual line.
+   *
+   * @remarks
+   * Unlike {@link select.relativeToAnchor}, the selection follows the anchor's line rather than a
+   * fixed box, so it never catches the next line when OCR boxes shift vertically.
+   *
+   * @param options - Anchor matching and stop options
+   * @returns A line-scoped anchor selector
+   */
+  afterAnchor(options: {
+    /** Literal or regular-expression anchor, matched line by line. */
+    readonly text: string | RegExp;
+    /** Literal or regular-expression text before which the selection stops, such as the next label. */
+    readonly stopAt?: string | RegExp;
+    /** Pages eligible for anchor matching. @defaultValue `"any"` */
+    readonly page?: PageSelector;
+    /** Zero-based matching anchor occurrence. @defaultValue `0` */
+    readonly occurrence?: number;
+    /** Whether literal anchor and `stopAt` matching preserves case. @defaultValue `false` */
+    readonly caseSensitive?: boolean;
+  }): AfterAnchorSelector {
+    return {
+      kind: "afterAnchor",
+      text: options.text,
+      ...(options.stopAt === undefined ? {} : { stopAt: options.stopAt }),
       page: options.page ?? "any",
       occurrence: options.occurrence ?? 0,
       caseSensitive: options.caseSensitive ?? false,

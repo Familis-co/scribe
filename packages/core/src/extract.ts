@@ -1,4 +1,5 @@
 import type {
+  AfterAnchorSelector,
   AnchorSelector,
   DocumentProfile,
   FieldDefinition,
@@ -184,6 +185,57 @@ function groupLines(tokens: readonly TextToken[]): readonly (readonly TextToken[
 }
 
 /**
+ * Joins one line's tokens with single spaces.
+ *
+ * @param line - Tokens of a single line, left to right
+ * @returns The line text and the character range of every token in it
+ */
+function lineText(line: readonly TextToken[]): {
+  text: string;
+  spans: readonly { start: number; end: number; token: TextToken }[];
+} {
+  const spans: Array<{ start: number; end: number; token: TextToken }> = [];
+  let text = "";
+  for (const token of line) {
+    if (text.length > 0) text += " ";
+    const start = text.length;
+    text += token.text;
+    spans.push({ start, end: text.length, token });
+  }
+  return { text, spans };
+}
+
+/**
+ * Finds the first occurrence of a literal or regular expression in text.
+ *
+ * @param text - Text to search
+ * @param search - Literal text or regular expression, whose `g` flag is ignored
+ * @param caseSensitive - Whether literal matching preserves case
+ * @returns The `[start, end)` range of the first match, or `undefined` when there is none
+ */
+function findText(
+  text: string,
+  search: string | RegExp,
+  caseSensitive: boolean,
+): { start: number; end: number } | undefined {
+  if (typeof search === "string") {
+    const haystack = caseSensitive ? text : text.toLocaleLowerCase();
+    const start = haystack.indexOf(caseSensitive ? search : search.toLocaleLowerCase());
+    return start < 0 ? undefined : { start, end: start + search.length };
+  }
+  const match = new RegExp(search.source, search.flags.replaceAll("g", "")).exec(text);
+  return match ? { start: match.index, end: match.index + match[0].length } : undefined;
+}
+
+/** One line-level occurrence of an anchor. */
+interface AnchorMatch {
+  /** Union of the tokens covered by the match. */
+  readonly box: BoundingBox;
+  /** Tokens of the same line to the right of the anchor's last token, left to right. */
+  readonly following: readonly TextToken[];
+}
+
+/**
  * Finds every line-level occurrence of an anchor's text.
  *
  * @remarks
@@ -192,51 +244,77 @@ function groupLines(tokens: readonly TextToken[]): readonly (readonly TextToken[
  *
  * @param tokens - Tokens of a single page
  * @param selector - Anchor text and matching options
- * @returns Bounding boxes of the tokens covered by each match, in reading order
+ * @returns Each match with the tokens that follow it on its line, in reading order
  */
 function findAnchors(
   tokens: readonly TextToken[],
-  selector: AnchorSelector,
-): readonly BoundingBox[] {
-  const anchors: BoundingBox[] = [];
-  for (const lineTokens of groupLines(tokens)) {
-    const spans: Array<{ start: number; end: number; token: TextToken }> = [];
-    let text = "";
-    for (const token of lineTokens) {
-      if (text.length > 0) text += " ";
-      const start = text.length;
-      text += token.text;
-      spans.push({ start, end: text.length, token });
-    }
-
-    let start = -1;
-    let end = -1;
-    if (typeof selector.text === "string") {
-      const haystack = selector.caseSensitive ? text : text.toLocaleLowerCase();
-      const needle = selector.caseSensitive ? selector.text : selector.text.toLocaleLowerCase();
-      start = haystack.indexOf(needle);
-      end = start < 0 ? -1 : start + needle.length;
-    } else {
-      const flags = selector.text.flags.replaceAll("g", "");
-      const match = new RegExp(selector.text.source, flags).exec(text);
-      if (match) {
-        start = match.index;
-        end = start + match[0].length;
-      }
-    }
-
-    if (start >= 0) {
-      const matched = spans.filter((span) => span.end > start && span.start < end);
-      if (matched.length > 0) anchors.push(unionBoxes(matched.map((span) => span.token.box)));
-    }
+  selector: AnchorSelector | AfterAnchorSelector,
+): readonly AnchorMatch[] {
+  const anchors: AnchorMatch[] = [];
+  for (const line of groupLines(tokens)) {
+    const { text, spans } = lineText(line);
+    const found = findText(text, selector.text, selector.caseSensitive);
+    if (!found) continue;
+    const matched = spans.filter((span) => span.end > found.start && span.start < found.end);
+    if (matched.length === 0) continue;
+    anchors.push({
+      box: unionBoxes(matched.map((span) => span.token.box)),
+      following: line.slice(line.indexOf(matched.at(-1)!.token) + 1),
+    });
   }
   return anchors;
 }
 
 /**
- * Collects the tokens selected by a region or anchor selector across eligible pages.
+ * Cuts a line's tokens before the first token where a stop pattern matches.
  *
- * @param selector - Region or anchor-relative selector
+ * @param tokens - Tokens following an anchor, left to right
+ * @param stopAt - Literal or regular-expression stop text, which may span several tokens
+ * @param caseSensitive - Whether literal matching preserves case
+ * @returns The tokens that end before the stop match, or every token when it does not match
+ */
+function tokensBefore(
+  tokens: readonly TextToken[],
+  stopAt: string | RegExp,
+  caseSensitive: boolean,
+): readonly TextToken[] {
+  const { text, spans } = lineText(tokens);
+  const found = findText(text, stopAt, caseSensitive);
+  if (!found) return tokens;
+  return spans.filter((span) => span.end <= found.start).map((span) => span.token);
+}
+
+/**
+ * Selects the tokens of one page matched by a selector.
+ *
+ * @param selector - Region, anchor-relative, or line-scoped anchor selector
+ * @param tokens - Tokens of a single page
+ * @returns The selected tokens in any order, empty when the anchor is not found
+ */
+function selectOnPage(selector: TextSelector, tokens: readonly TextToken[]): readonly TextToken[] {
+  if (selector.kind === "region") {
+    return tokens.filter((token) => tokenCenterInBox(token, selector.box));
+  }
+  const anchor = findAnchors(tokens, selector)[selector.occurrence];
+  if (!anchor) return [];
+  if (selector.kind === "afterAnchor") {
+    return selector.stopAt === undefined
+      ? anchor.following
+      : tokensBefore(anchor.following, selector.stopAt, selector.caseSensitive);
+  }
+  const box = normalizeBox({
+    x: anchor.box.x + selector.offset.x,
+    y: anchor.box.y + selector.offset.y,
+    width: selector.offset.width,
+    height: selector.offset.height,
+  });
+  return tokens.filter((token) => tokenCenterInBox(token, box));
+}
+
+/**
+ * Collects the tokens selected by a selector across eligible pages.
+ *
+ * @param selector - Region, anchor-relative, or line-scoped anchor selector
  * @param pages - Pages available for extraction
  * @returns Selected tokens grouped by page in reading order, and the pages that contributed at least
  * one token
@@ -251,21 +329,7 @@ function tokensForSelector(
   for (const pageNumber of candidates) {
     const page = pages.find((item) => item.number === pageNumber);
     if (!page) continue;
-
-    let box: BoundingBox;
-    if (selector.kind === "region") {
-      box = selector.box;
-    } else {
-      const anchor = findAnchors(page.tokens, selector)[selector.occurrence];
-      if (!anchor) continue;
-      box = normalizeBox({
-        x: anchor.x + selector.offset.x,
-        y: anchor.y + selector.offset.y,
-        width: selector.offset.width,
-        height: selector.offset.height,
-      });
-    }
-    const tokens = page.tokens.filter((token) => tokenCenterInBox(token, box));
+    const tokens = selectOnPage(selector, page.tokens);
     if (tokens.length > 0) selections.push({ page: pageNumber, tokens: sortedTokens(tokens) });
   }
 
