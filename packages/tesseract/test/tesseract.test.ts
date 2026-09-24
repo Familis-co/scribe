@@ -1,12 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  access: vi.fn(),
   addJob: vi.fn(),
   addWorker: vi.fn(),
   createScheduler: vi.fn(),
   createWorker: vi.fn(),
   setParameters: vi.fn(),
   terminate: vi.fn(),
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  access: mocks.access,
 }));
 
 vi.mock("tesseract.js", () => ({
@@ -16,7 +22,7 @@ vi.mock("tesseract.js", () => ({
   PSM: { AUTO: "3", SINGLE_BLOCK: "6" },
 }));
 
-import { AbortError, OcrError } from "@familis/scribe";
+import { AbortError, DisposedError, OcrError } from "@familis/scribe";
 import sharp from "sharp";
 import { createTesseractEngine, PSM } from "../src/index.js";
 
@@ -43,6 +49,7 @@ async function sentPixels(call = 0): Promise<Uint8Array> {
 describe("Tesseract adapter", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.access.mockResolvedValue(undefined);
     mocks.createScheduler.mockReturnValue({
       addJob: mocks.addJob,
       addWorker: mocks.addWorker,
@@ -134,7 +141,7 @@ describe("Tesseract adapter", () => {
     await plain.close();
   });
 
-  it("rejects with OcrError when language data fails to load, then retries", async () => {
+  it("rejects with OcrError when language data fails to load, and remembers the failure", async () => {
     // Tesseract.js reports a missing language file to errorHandler and never settles createWorker.
     mocks.createWorker.mockImplementationOnce(
       (_languages: string[], _oem: number, options: { errorHandler: (report: string) => void }) => {
@@ -156,10 +163,77 @@ describe("Tesseract adapter", () => {
     });
     expect(mocks.addJob).not.toHaveBeenCalled();
 
-    const retried = await engine.recognize(bitmap, { languages: ["fra"] });
-    expect(mocks.createWorker).toHaveBeenCalledTimes(2);
-    expect(retried.tokens[0]?.text).toBe("Hello");
+    // Each failed start leaks a worker thread, so the failure is not retried.
+    await expect(engine.recognize(bitmap, { languages: ["fra"] })).rejects.toBe(
+      await failure.catch((error: unknown) => error),
+    );
+    expect(mocks.createWorker).toHaveBeenCalledTimes(1);
     await engine.close();
+  });
+
+  it("rejects a missing language file without starting a worker", async () => {
+    const missing = Object.assign(new Error("ENOENT: no such file or directory"), {
+      code: "ENOENT",
+    });
+    mocks.access.mockImplementation(async (file: string) => {
+      if (file.includes("deu")) throw missing;
+    });
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    const bitmap = { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" } as const;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const failure = engine.recognize(bitmap, { languages: ["fra", "deu"] });
+      await expect(failure).rejects.toBeInstanceOf(OcrError);
+      await expect(failure).rejects.toMatchObject({
+        message: expect.stringMatching(/deu\.traineddata\.gz.*\/models/u),
+        cause: missing,
+      });
+    }
+    expect(mocks.createWorker).not.toHaveBeenCalled();
+    expect(mocks.access).toHaveBeenCalledWith("/models/deu.traineddata.gz", expect.any(Number));
+
+    // The check runs again on every call, so data deployed after the failure is picked up.
+    mocks.access.mockResolvedValue(undefined);
+    await engine.recognize(bitmap, { languages: ["fra", "deu"] });
+    expect(mocks.createWorker).toHaveBeenCalledTimes(1);
+    await engine.close();
+  });
+
+  it("checks the file name Tesseract.js reads and skips remote language data", async () => {
+    const bitmap = { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" } as const;
+    const plain = await createTesseractEngine({ languageDataPath: "/models", compressed: false });
+    await plain.recognize(bitmap, { languages: ["fra"] });
+    expect(mocks.access).toHaveBeenCalledWith("/models/fra.traineddata", expect.any(Number));
+
+    mocks.access.mockClear();
+    const remote = await createTesseractEngine({
+      languageDataPath: "https://tessdata.example.com/4.0.0",
+    });
+    await remote.recognize(bitmap, { languages: ["fra"] });
+    expect(mocks.access).not.toHaveBeenCalled();
+    await plain.close();
+    await remote.close();
+  });
+
+  it("starts no worker when closed while the language data is being checked", async () => {
+    let checked: (() => void) | undefined;
+    mocks.access.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          checked = resolve;
+        }),
+    );
+    const engine = await createTesseractEngine({ languageDataPath: "/models" });
+    const pending = engine.recognize(
+      { data: new Uint8Array([255]), width: 1, height: 1, format: "gray8" },
+      { languages: ["eng"] },
+    );
+    await vi.waitFor(() => expect(checked).toBeDefined());
+    await engine.close();
+    checked?.();
+
+    await expect(pending).rejects.toBeInstanceOf(DisposedError);
+    expect(mocks.createWorker).not.toHaveBeenCalled();
   });
 
   it("terminates the workers that started when a sibling fails", async () => {
