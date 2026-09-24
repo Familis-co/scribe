@@ -10,7 +10,7 @@ It does not include a PDF or OCR implementation. Install the adapters you need s
 
 - Declarative profiles for documents that share a layout.
 - Fixed-region, anchor-relative and line-scoped anchor selectors using normalized coordinates.
-- Scalar, nested, and repeated fields, with ordered fallbacks between strategies.
+- Scalar, nested, repeated and table fields, with ordered fallbacks between strategies.
 - Regex captures and built-in transformations.
 - Standard Schema validation, including asynchronous validators and Zod 4.
 - Selective OCR of whole pages or declared regions, with per-page diagnostics.
@@ -212,6 +212,45 @@ alternatives' own values are ignored. Evidence records the winning alternative's
 `alternative`, and an info diagnostic `FALLBACK_USED` explains why earlier alternatives failed. When
 every alternative fails on a required field, `parse` rejects with an `ExtractionError` naming the
 field's pointer.
+
+### Tables
+
+`field.table` extracts a table as an array of rows keyed by column, with evidence for every cell:
+
+```ts
+visits: field.table({
+  select: select.region({ x: 0.05, y: 0.355, width: 0.9, height: 0.485 }, 1),
+  columns: [
+    { key: "date", label: /^Date$/iu, transforms: [looseDate] },
+    { key: "start", label: /^Début$/iu, transforms: [clockTime] },
+    { key: "end", label: /^Fin$/iu, transforms: [clockTime], required: false },
+    { key: "worker", label: "Travailleur", transforms: [transform.normalizeWhitespace()] },
+  ],
+  rowKey: "start", // a new row starts where this column has a token
+  filter: (row) => row.date != null, // optional
+}),
+```
+
+1. **Header:** the first line of the selection where every column label matches. A string label is
+   compared case-insensitively with whole tokens; a pattern is tested against runs of tokens, so
+   labels may span several words.
+2. **Columns:** boundaries sit halfway between adjacent label centers rather than at label edges,
+   because values are often wider than their centered label. Each token below the header goes to the
+   column containing its center.
+3. **Rows:** a row starts at every line with a token in the `rowKey` column. Any other line attaches
+   to the vertically **nearest** row, so a cell wrapped onto its own line above its row still lands
+   in that row. A cell's tokens are joined in reading order.
+4. **Cells:** column transforms run per cell. A failing transform sets the cell to `null` and emits
+   `TRANSFORM_FAILED` with the cell's pointer. An empty optional cell is `null`. A row missing a
+   required cell (columns are required by default) is dropped with a `TABLE_ROW_DROPPED` warning.
+   `filter` then runs on the transformed row, and the schema has the final word.
+5. **Evidence:** one entry per non-empty cell, keyed by pointers such as `/visits/3/date`, numbered
+   after filtering. `warnBelowConfidence` applies to every cell.
+
+Lines are grouped by position, so tables read the same from native, OCR and mixed pages. Keep the
+selector tight around the table: lines below the last row join it. When a page has no matching
+header the table is treated like a missing field, and each selected page is laid out on its own, so
+a header repeated on every page continues the table.
 
 ### Built-in transforms
 
