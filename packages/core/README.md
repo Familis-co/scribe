@@ -10,7 +10,7 @@ It does not include a PDF or OCR implementation. Install the adapters you need s
 
 - Declarative profiles for documents that share a layout.
 - Fixed-region, anchor-relative and line-scoped anchor selectors using normalized coordinates.
-- Scalar, nested, and repeated fields.
+- Scalar, nested, and repeated fields, with ordered fallbacks between strategies.
 - Regex captures and built-in transformations.
 - Standard Schema validation, including asynchronous validators and Zod 4.
 - Selective OCR with per-page diagnostics.
@@ -173,6 +173,45 @@ field.list({
 
 Fields are required by default. Set `required: false` for optional fields or provide a
 `defaultValue`.
+
+### Fallback strategies
+
+`field.firstOf` tries several strategies in order: the precise one first, then looser ones when it
+fails.
+
+```ts
+const digitsOnly = transform.custom("digitsOnly", (value) => {
+  const digits = String(value).replace(/\D/gu, "");
+  if (digits.length !== 10) throw new TypeError(`Expected 10 digits, got ${digits.length}.`);
+  return digits;
+});
+
+dossier: field.firstOf(
+  [
+    field.text({
+      select: select.afterAnchor({ text: /Reference\s*:/iu }),
+      transforms: [digitsOnly],
+    }),
+    field.text({
+      select: select.region({ x: 0, y: 0.2, width: 1, height: 0.2 }, 1),
+      pattern: /Ref\w*\s*[:.]?\s*(\d{4,})/iu,
+      group: 1,
+      transforms: [digitsOnly],
+    }),
+  ],
+  { required: true, warnBelowConfidence: 0.8 },
+);
+```
+
+The first alternative that captures a value **and** whose transforms all succeed wins. A transform
+that throws rejects that reading and moves on to the next alternative, which is how a strategy says
+"this is not a valid value".
+
+`required`, `defaultValue` and `warnBelowConfidence` belong to the `firstOf` wrapper; the
+alternatives' own values are ignored. Evidence records the winning alternative's index as
+`alternative`, and an info diagnostic `FALLBACK_USED` explains why earlier alternatives failed. When
+every alternative fails on a required field, `parse` rejects with an `ExtractionError` naming the
+field's pointer.
 
 ### Built-in transforms
 
