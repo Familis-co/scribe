@@ -40,7 +40,7 @@
     "lefthook": "2.1.14",
     "oxfmt": "0.70.0",
     "oxlint": "1.85.0",
-    "oxlint-tsgolint": "7.0.2002",
+    "oxlint-tsgolint": "7.0.2003",
     "taze": "21.1.0",
     "tsup": "8.5.1",
     "typescript": "7.0.2",
